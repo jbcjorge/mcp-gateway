@@ -1,4 +1,12 @@
 github.com/bored-engineer/go-launchd v0.0.0-20241220214420-b514778f4f80 h1:O7c0CDkfGaIa7eNktOIBoPpuaq0zazOqB3iTghXIySw=
 github.com/bored-engineer/go-launchd v0.0.0-20241220214420-b514778f4f80/go.mod h1:fuBezjGxBjQFkJeCIN1eTo9c27q2WxjHK7tRlfBkyQk=
+github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/jbcjorge/errors-library v0.1.0 h1:3bxewK8DVhKynVzfmLICfVafKcUyKv9bdLbn5QEULK8=
 github.com/jbcjorge/errors-library v0.1.0/go.mod h1:AStD3fICF98k0rrfR6If4235oRa2hbj1i3mdSQgwvRo=
+github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
