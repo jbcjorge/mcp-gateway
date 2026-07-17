@@ -1,0 +1,36 @@
+# Binary
+mcp-gateway
+
+# Build artifacts
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage reports
+reports/
+*.test
+*.out
+coverage.*
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Tool caches
+.kiro/
+
+# OS files
+.DS_Store
+Thumbs.db
