@@ -13,9 +13,11 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
 
@@ -25,37 +27,32 @@ jobs:
       - name: Install gitleaks
         run: |
           GITLEAKS_VERSION=8.21.2
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+          curl -sSfL --proto =https "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | sudo tar xz -C /usr/local/bin gitleaks
 
       - name: Run all quality gates
         run: make check
 
-      - name: Generate coverage reports
-        run: make test-report
+      - name: Generate reports
+        if: always()
+        run: make test-report || true
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
         with:
           files: reports/coverage.xml
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v1
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-      - name: SonarQube Cloud Scan
-        uses: SonarSource/sonarqube-scan-action@v5
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v5
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: coverage-reports
+          name: test-reports
           path: reports/
