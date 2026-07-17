@@ -1,0 +1,4 @@
+github.com/bored-engineer/go-launchd v0.0.0-20241220214420-b514778f4f80 h1:O7c0CDkfGaIa7eNktOIBoPpuaq0zazOqB3iTghXIySw=
+github.com/bored-engineer/go-launchd v0.0.0-20241220214420-b514778f4f80/go.mod h1:fuBezjGxBjQFkJeCIN1eTo9c27q2WxjHK7tRlfBkyQk=
+github.com/jbcjorge/errors-library v0.1.0 h1:3bxewK8DVhKynVzfmLICfVafKcUyKv9bdLbn5QEULK8=
+github.com/jbcjorge/errors-library v0.1.0/go.mod h1:AStD3fICF98k0rrfR6If4235oRa2hbj1i3mdSQgwvRo=
