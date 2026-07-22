@@ -22,6 +22,8 @@ RUN CGO_ENABLED=0 go build -ldflags "-s -w \
 FROM scratch
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /src/LICENSE /LICENSE
+COPY --from=build /src/NOTICES /NOTICES
 COPY --from=build /mcp-gateway /mcp-gateway
 
 USER 10001

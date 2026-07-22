@@ -38,6 +38,7 @@ var (
 	ErrBackendNotConfigured = errors.New("no command or url defined for backend %s")
 	ErrBackendStartFailed   = errors.New("backend start failed")
 	ErrBackendRestartFailed = errors.New("backend restart failed")
+	ErrBackendInitFailed    = errors.New("backend initialization failed")
 	ErrBackendNotRunning    = errors.New("backend not running")
 	ErrBackendClosed        = errors.New("backend closed")
 	ErrBackendTimeout       = errors.New("timeout waiting for response")

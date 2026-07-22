@@ -1064,8 +1064,36 @@ func (b *Backend) ensureRunning() error {
 	// Release lock before sending initialize (send() needs to acquire it)
 	b.mu.Unlock()
 
-	b.initializeBackend()
-	return nil
+	const maxInitRetries = 3
+	var initErr error
+	for attempt := 1; attempt <= maxInitRetries; attempt++ {
+		initErr = b.initializeBackend()
+		if initErr == nil {
+			return nil
+		}
+
+		slog.Warn("backend init failed, will retry", "backend", b.name, "attempt", attempt, "max", maxInitRetries, "error", initErr)
+
+		// Kill the broken process
+		b.kill()
+
+		if attempt == maxInitRetries {
+			break
+		}
+
+		// Backoff: 1s, 2s
+		time.Sleep(time.Duration(attempt) * time.Second)
+
+		// Re-spawn for next attempt
+		b.mu.Lock()
+		if err := b.spawnProcess(); err != nil {
+			b.mu.Unlock()
+			return err
+		}
+		b.mu.Unlock()
+	}
+
+	return initErr
 }
 
 // spawnProcess starts the subprocess and sets up stdin/stdout pipes.
@@ -1134,13 +1162,29 @@ func (b *Backend) waitForExit(cmd *exec.Cmd) {
 }
 
 // initializeBackend sends the MCP initialize handshake to the subprocess.
-func (b *Backend) initializeBackend() {
+// Returns an error if the backend fails to initialize or responds with a JSON-RPC error.
+func (b *Backend) initializeBackend() error {
 	initMsg := []byte(`{"jsonrpc":"2.0","id":"_gw_init","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcp-gateway","version":"1.0.0"}}}`)
-	if resp, err := b.send(context.Background(), initMsg); err != nil {
+	resp, err := b.send(context.Background(), initMsg)
+	if err != nil {
 		slog.Error("backend initialize failed", "backend", b.name, "error", err)
-	} else {
-		slog.Info("backend initialized", "backend", b.name, "response", truncate(resp, 100))
+		return ErrBackendInitFailed.Parse(errors.WithError(err))
 	}
+
+	// Check if the response contains a JSON-RPC error
+	var rpcResp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(resp, &rpcResp) == nil && rpcResp.Error != nil {
+		initErr := fmt.Errorf("%s", rpcResp.Error.Message)
+		slog.Error("backend initialize returned error", "backend", b.name, "code", rpcResp.Error.Code, "message", rpcResp.Error.Message)
+		return ErrBackendInitFailed.Parse(errors.WithError(initErr))
+	}
+
+	slog.Info("backend initialized", "backend", b.name, "response", truncate(resp, 100))
 
 	// Send notifications/initialized (fire-and-forget)
 	b.mu.Lock()
@@ -1150,6 +1194,7 @@ func (b *Backend) initializeBackend() {
 		}
 	}
 	b.mu.Unlock()
+	return nil
 }
 
 // send writes a JSON-RPC message to stdin and waits for the correlated response.
