@@ -3463,3 +3463,91 @@ func TestCredentialTTL_TimersStoppedOnExit(t *testing.T) {
 		t.Error("pendingTTLKill should be cleared after backend exit")
 	}
 }
+
+func TestParseCredentialExpiry(t *testing.T) {
+	cases := []struct {
+		name  string
+		line  string
+		want  int64
+		wantK bool
+	}{
+		{"valid", "[[gateway:credential_expiry]] 1788454542", 1788454542, true},
+		{"valid with prefix noise", "INFO foo [[gateway:credential_expiry]] 42 trailing", 42, true},
+		{"no sentinel", "some unrelated log line", 0, false},
+		{"empty value", "[[gateway:credential_expiry]]   ", 0, false},
+		{"non-numeric", "[[gateway:credential_expiry]] abc", 0, false},
+		{"zero", "[[gateway:credential_expiry]] 0", 0, false},
+		{"negative", "[[gateway:credential_expiry]] -5", 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseCredentialExpiry([]byte(c.line))
+			if got != c.want || ok != c.wantK {
+				t.Errorf("parseCredentialExpiry(%q) = (%d,%v), want (%d,%v)", c.line, got, ok, c.want, c.wantK)
+			}
+		})
+	}
+}
+
+func TestScanStderr_ArmsTTLFromSentinel(t *testing.T) {
+	b := &Backend{
+		name:        "scan-backend",
+		def:         BackendDef{Command: subprocessCommand(), Env: map[string]string{"TEST_SUBPROCESS": "1"}},
+		pending:     make(map[string]chan json.RawMessage),
+		activeTools: make(map[string]bool),
+	}
+	b.mu.Lock()
+	if err := b.spawnProcess(); err != nil {
+		b.mu.Unlock()
+		t.Fatalf("spawnProcess: %v", err)
+	}
+	pid := b.cmd.Process.Pid
+	b.mu.Unlock()
+	defer b.kill()
+
+	// Feed a sentinel line through scanStderr directly (far-future expiry so no
+	// timer fires); it should set credentialExpiry and arm timers.
+	future := time.Now().Add(2 * time.Hour).Unix()
+	r := strings.NewReader("noise line\n[[gateway:credential_expiry]] " + fmt.Sprintf("%d", future) + "\n")
+	done := make(chan struct{})
+	go func() { b.scanStderr(r, pid); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanStderr did not return")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.credentialExpiry.Unix() != future {
+		t.Errorf("credentialExpiry = %d, want %d", b.credentialExpiry.Unix(), future)
+	}
+	if b.softTimer == nil || b.hardTimer == nil {
+		t.Error("timers should be armed after sentinel")
+	}
+}
+
+func TestArmCredentialTTL_DefaultMargins(t *testing.T) {
+	b := &Backend{
+		name:        "defaults-backend",
+		def:         BackendDef{Command: subprocessCommand(), Env: map[string]string{"TEST_SUBPROCESS": "1"}},
+		pending:     make(map[string]chan json.RawMessage),
+		activeTools: make(map[string]bool),
+		// ttlSoftMargin / ttlHardGuard left zero -> defaults (5m / 2m) apply.
+	}
+	b.mu.Lock()
+	if err := b.spawnProcess(); err != nil {
+		b.mu.Unlock()
+		t.Fatalf("spawnProcess: %v", err)
+	}
+	pid := b.cmd.Process.Pid
+	b.mu.Unlock()
+	defer b.kill()
+
+	// Far-future expiry so nothing fires; just exercise the default-margin path.
+	b.armCredentialTTL(time.Now().Add(3*time.Hour), pid)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.softTimer == nil || b.hardTimer == nil {
+		t.Error("timers should be armed with default margins")
+	}
+}

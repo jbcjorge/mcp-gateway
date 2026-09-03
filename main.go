@@ -189,12 +189,10 @@ func main() {
 	// Resolve the optional CA bundle and inject its path into all backends'
 	// environment. Company/OS specifics live entirely in the configured
 	// generate command; the gateway only dispatches and injects.
-	caEnv, caErr := resolveCABundleEnv(cfg.CABundle)
-	if caErr != nil {
+	if caErr := applyCABundleToConfig(&cfg); caErr != nil {
 		slog.Error("CA bundle required but unavailable", "error", caErr)
 		os.Exit(exitCABundleFailed)
 	}
-	cfg.Env = mergeCAEnv(cfg.Env, caEnv)
 
 	gw := newGateway(cfg)
 
@@ -1209,18 +1207,33 @@ func (b *Backend) scanStderr(r io.Reader, pid int) {
 		if idx < 0 {
 			continue
 		}
-		rest := strings.TrimSpace(string(line[idx+len(credentialExpirySentinel):]))
-		fields := strings.Fields(rest)
-		if len(fields) == 0 {
-			continue
-		}
-		epoch, perr := strconv.ParseInt(fields[0], 10, 64)
-		if perr != nil || epoch <= 0 {
-			slog.Warn("invalid credential_expiry sentinel", "backend", b.name, "value", rest)
+		epoch, ok := parseCredentialExpiry(line)
+		if !ok {
+			slog.Warn("invalid credential_expiry sentinel", "backend", b.name, "line", string(line))
 			continue
 		}
 		b.armCredentialTTL(time.Unix(epoch, 0), pid)
 	}
+}
+
+// parseCredentialExpiry extracts the unix-epoch value from a credential-expiry
+// sentinel line ("[[gateway:credential_expiry]] <epoch>"). Returns ok=false if
+// the sentinel is absent or the value is missing/invalid/non-positive.
+func parseCredentialExpiry(line []byte) (int64, bool) {
+	idx := bytes.Index(line, []byte(credentialExpirySentinel))
+	if idx < 0 {
+		return 0, false
+	}
+	rest := strings.TrimSpace(string(line[idx+len(credentialExpirySentinel):]))
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return 0, false
+	}
+	epoch, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || epoch <= 0 {
+		return 0, false
+	}
+	return epoch, true
 }
 
 // armCredentialTTL sets the credential expiry and arms the soft and hard timers.

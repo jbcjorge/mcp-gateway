@@ -1,0 +1,20 @@
+coverage:
+  status:
+    project:
+      default:
+        # Allow small, legitimate dips (e.g. hard-to-unit-test main() wiring)
+        # without failing the build.
+        target: auto
+        threshold: 2%
+        informational: false
+    patch:
+      default:
+        # Require new/changed lines to be reasonably covered, but use a fixed,
+        # attainable floor rather than "match overall coverage exactly", which
+        # penalizes integration glue that unit tests can't reach.
+        target: 80%
+        threshold: 2%
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true

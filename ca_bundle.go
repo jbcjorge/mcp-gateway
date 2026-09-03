@@ -126,6 +126,19 @@ func resolveCABundleEnv(cfg *CABundleConfig) (map[string]string, error) {
 	return env, nil
 }
 
+// applyCABundleToConfig resolves the CA bundle (if configured) and merges the
+// resulting CA environment variables into cfg.Env so every backend inherits
+// them. Returns a non-nil error only when a required bundle is unavailable
+// (require_bundle=true); callers should treat that as fatal.
+func applyCABundleToConfig(cfg *Config) error {
+	caEnv, err := resolveCABundleEnv(cfg.CABundle)
+	if err != nil {
+		return err
+	}
+	cfg.Env = mergeCAEnv(cfg.Env, caEnv)
+	return nil
+}
+
 // mergeCAEnv merges the CA env vars into the config's global Env (existing keys
 // win, matching injectCAEnv's override semantics at the config level).
 func mergeCAEnv(cfgEnv map[string]string, caEnv map[string]string) map[string]string {
