@@ -101,9 +101,11 @@ With launchd socket activation:
 
 You only need to run `launchctl load` once. Subsequent `make install` calls update the binary in-place; launchd picks up the new version on next spawn.
 
-### 5. Configure Kiro to use the gateway
+### 5. Configure your MCP client to use the gateway
 
-In `~/.kiro/settings/mcp.json`, use URL-based servers pointing to the gateway:
+Point any MCP client that supports HTTP transport at the gateway's per-backend
+URLs. For clients configured via a JSON file (path varies by client), use
+URL-based servers:
 
 ```json
 {

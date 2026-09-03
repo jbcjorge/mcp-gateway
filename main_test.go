@@ -285,7 +285,7 @@ func TestPathParsing(t *testing.T) {
 		path     string
 		expected string
 	}{
-		{"/askthedev/mcp", "askthedev"},
+		{"/search/mcp", "search"},
 		{"/wiki/mcp", "wiki"},
 		{"/gitlab", "gitlab"},
 		{"/my-backend/mcp", "my-backend"},
