@@ -3,5 +3,12 @@
   "log_level": "info",
   "idle_timeout_seconds": 300,
   "self_idle_timeout_seconds": 3600,
-  "backends_file": "backends.json"
+  "backends_file": "backends.json",
+  "credential_ttl_soft_margin_seconds": 300,
+  "credential_ttl_hard_guard_seconds": 120,
+  "ca_bundle": {
+    "path": "/absolute/path/to/ca-bundle.pem",
+    "generate_command": ["/absolute/path/to/generate-ca.sh"],
+    "require_bundle": false
+  }
 }

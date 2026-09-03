@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1015,6 +1016,18 @@ func TestSubprocessHelper(t *testing.T) {
 	if os.Getenv("TEST_SUBPROCESS") != "1" {
 		t.Skip("helper process")
 	}
+	// Optionally emit the credential-expiry sentinel to stderr at startup so
+	// the gateway's TTL watcher can be exercised. Value is a unix epoch.
+	if exp := os.Getenv("TEST_CRED_EXPIRY"); exp != "" {
+		fmt.Fprintf(os.Stderr, "[[gateway:credential_expiry]] %s\n", exp)
+	}
+	// Optional per-response delay (milliseconds) to simulate an in-flight request.
+	var respDelay time.Duration
+	if d := os.Getenv("TEST_RESP_DELAY_MS"); d != "" {
+		if ms, err := strconv.Atoi(d); err == nil {
+			respDelay = time.Duration(ms) * time.Millisecond
+		}
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1036,6 +1049,9 @@ func TestSubprocessHelper(t *testing.T) {
 			resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"get_users","description":"Get users"},{"name":"create_issue","description":"Create issue"},{"name":"delete_repo","description":"Delete repo"},{"name":"search_code","description":"Search code"},{"name":"list_items","description":"List items"},{"name":"update_thing","description":"Update thing"},{"name":"custom_action","description":"Custom action"}]}}`, string(*msg.ID))
 			fmt.Println(resp)
 		} else {
+			if respDelay > 0 {
+				time.Sleep(respDelay)
+			}
 			resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{}}`, string(*msg.ID))
 			fmt.Println(resp)
 		}
@@ -3245,5 +3261,194 @@ func TestWriteResponse_EmptyBody(t *testing.T) {
 
 	if w.Code != http.StatusAccepted {
 		t.Errorf("expected 202 for empty response, got %d", w.Code)
+	}
+}
+
+// --- Credential TTL watcher tests ---
+
+// newTTLBackend spawns a helper backend that emits a credential_expiry sentinel
+// (expiry set relative to now) with the given soft/hard margins.
+func newTTLBackend(t *testing.T, expiry time.Time, soft, hard time.Duration, respDelayMS int) *Backend {
+	t.Helper()
+	env := map[string]string{
+		"TEST_SUBPROCESS":  "1",
+		"TEST_CRED_EXPIRY": fmt.Sprintf("%d", expiry.Unix()),
+	}
+	if respDelayMS > 0 {
+		env["TEST_RESP_DELAY_MS"] = fmt.Sprintf("%d", respDelayMS)
+	}
+	b := &Backend{
+		name:          "ttl-backend",
+		def:           BackendDef{Command: subprocessCommand(), Env: env},
+		pending:       make(map[string]chan json.RawMessage),
+		activeTools:   make(map[string]bool),
+		logEnabled:    true,
+		ttlSoftMargin: soft,
+		ttlHardGuard:  hard,
+	}
+	b.mu.Lock()
+	if err := b.spawnProcess(); err != nil {
+		b.mu.Unlock()
+		t.Fatalf("spawnProcess: %v", err)
+	}
+	b.lastUsed = time.Now()
+	b.mu.Unlock()
+	return b
+}
+
+func TestCredentialTTL_SentinelParsed(t *testing.T) {
+	// Expiry far in the future so no timer fires; just verify parsing/arming.
+	expiry := time.Now().Add(1 * time.Hour)
+	b := newTTLBackend(t, expiry, 5*time.Minute, 2*time.Minute, 0)
+	defer b.kill()
+
+	// Give the stderr scanner a moment to read the sentinel line.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b.mu.Lock()
+		set := !b.credentialExpiry.IsZero()
+		b.mu.Unlock()
+		if set {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b.mu.Lock()
+	got := b.credentialExpiry
+	b.mu.Unlock()
+	if got.IsZero() {
+		t.Fatal("credentialExpiry should have been set from the sentinel")
+	}
+	if d := got.Unix() - expiry.Unix(); d != 0 {
+		t.Errorf("credentialExpiry mismatch: got %d want %d", got.Unix(), expiry.Unix())
+	}
+	if b.isRunning() != true {
+		t.Error("backend should still be running (expiry far in future)")
+	}
+}
+
+func TestCredentialTTL_SoftDeadlineRecyclesWhenIdle(t *testing.T) {
+	// soft deadline = expiry - soft. Put it ~150ms in the future.
+	soft := 500 * time.Millisecond
+	hard := 100 * time.Millisecond
+	expiry := time.Now().Add(soft + 150*time.Millisecond)
+	b := newTTLBackend(t, expiry, soft, hard, 0)
+	defer b.kill()
+
+	// No pending requests -> should recycle at the soft deadline.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !b.isRunning() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if b.isRunning() {
+		t.Error("idle backend should have been recycled at soft deadline")
+	}
+}
+
+func TestCredentialTTL_DefersWhileBusyThenRecycles(t *testing.T) {
+	// Response delayed 400ms. Soft deadline fires early (~immediately) while the
+	// request is in flight, so recycle must be deferred until the response
+	// drains. The hard guard is set to land well after the response completes so
+	// it does NOT force-kill first; the drain path must do the recycle.
+	respDelayMS := 400
+	soft := 300 * time.Millisecond
+	hard := 100 * time.Millisecond
+	// expiry - soft ~= now (soft fires ~immediately).
+	// expiry - hard = soft - hard + 1200ms ~= 1400ms out, safely after the 400ms
+	// response completes.
+	expiry := time.Now().Add(soft + 1200*time.Millisecond)
+	b := newTTLBackend(t, expiry, soft, hard, respDelayMS)
+	defer b.kill()
+
+	// Fire a request that the backend will take 400ms to answer.
+	respDone := make(chan struct{})
+	go func() {
+		_, _ = b.send(context.Background(), []byte(`{"jsonrpc":"2.0","id":"busy1","method":"tools/call","params":{}}`))
+		close(respDone)
+	}()
+
+	// Give the soft deadline time to fire while the request is in flight; the
+	// backend must still be running (kill deferred, not forced).
+	time.Sleep(200 * time.Millisecond)
+	if !b.isRunning() {
+		t.Fatal("backend should NOT be recycled while a request is in flight")
+	}
+
+	// Wait for the response to complete, which triggers the deferred recycle.
+	select {
+	case <-respDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("in-flight request did not complete")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !b.isRunning() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if b.isRunning() {
+		t.Error("backend should have been recycled after the in-flight request drained")
+	}
+}
+
+func TestCredentialTTL_HardDeadlineForceKillsWhileBusy(t *testing.T) {
+	// Response delayed very long; hard deadline must force-kill even though busy.
+	soft := 200 * time.Millisecond
+	hard := 100 * time.Millisecond
+	// hard deadline = expiry - hard. Put it ~300ms out. Response takes 5s.
+	expiry := time.Now().Add(hard + 300*time.Millisecond)
+	b := newTTLBackend(t, expiry, soft, hard, 5000)
+	defer b.kill()
+
+	go func() {
+		_, _ = b.send(context.Background(), []byte(`{"jsonrpc":"2.0","id":"busy2","method":"tools/call","params":{}}`))
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !b.isRunning() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if b.isRunning() {
+		t.Error("busy backend should have been force-killed at hard deadline")
+	}
+}
+
+func TestCredentialTTL_TimersStoppedOnExit(t *testing.T) {
+	// Arm timers with a future soft deadline, then kill the backend explicitly.
+	// After exit, the timers must be nil (no orphan watcher).
+	soft := 5 * time.Second
+	hard := 2 * time.Second
+	expiry := time.Now().Add(10 * time.Second)
+	b := newTTLBackend(t, expiry, soft, hard, 0)
+
+	// Wait until timers are armed.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b.mu.Lock()
+		armed := b.softTimer != nil || b.hardTimer != nil
+		b.mu.Unlock()
+		if armed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	b.kill()
+	time.Sleep(300 * time.Millisecond) // let waitForExit run
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.softTimer != nil || b.hardTimer != nil {
+		t.Error("TTL timers should be stopped and cleared after backend exit")
+	}
+	if b.pendingTTLKill {
+		t.Error("pendingTTLKill should be cleared after backend exit")
 	}
 }

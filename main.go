@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +37,13 @@ var (
 // logLevel is the runtime-adjustable log level for the gateway.
 var logLevel = new(slog.LevelVar)
 
+// Exit codes. Use these constants for every os.Exit call.
+const (
+	exitOK             = 0 // clean exit
+	exitFailure        = 1 // generic startup/runtime failure
+	exitCABundleFailed = 3 // required CA bundle missing/unreadable (require_bundle=true)
+)
+
 // Size limits for request and response bodies.
 const (
 	maxRequestBodySize  = 5 * 1024 * 1024  // 5MB - JSON-RPC requests are small
@@ -44,20 +53,23 @@ const (
 
 // Config is the top-level configuration.
 type Config struct {
-	Listen          string                `json:"listen"`
-	LogLevel        string                `json:"log_level"`                 // debug, info, warn, error (default: info)
-	LogFile         string                `json:"log_file"`                  // path to log file (default: stderr)
-	LogMaxSizeMB    int                   `json:"log_max_size_mb"`           // max log file size in MB before rotation (default: 10)
-	LogMaxFiles     int                   `json:"log_max_files"`             // number of rotated files to keep (default: 3)
-	CacheDir        string                `json:"cache_dir"`                 // directory for persistent tools cache (default: alongside config)
-	MaxDescLen      int                   `json:"max_description_length"`    // truncate tool descriptions to this length (0 = no truncation)
-	Discovery       *bool                 `json:"discovery"`                 // global discovery toggle: nil=auto, true=force, false=disable for all backends
-	Env             map[string]string     `json:"env"`                       // global environment variables for all backends
-	AuthTokens      []string              `json:"auth_tokens"`               // global bearer tokens (used when backend has no own tokens)
-	IdleTimeout     int                   `json:"idle_timeout_seconds"`      // kill backends idle for this long (0 = never)
-	SelfIdleTimeout int                   `json:"self_idle_timeout_seconds"` // kill gateway itself after this long with no requests (0 = never)
-	BackendsFile    string                `json:"backends_file"`             // path to backends.json (relative to config dir)
-	Backends        map[string]BackendDef `json:"backends"`
+	Listen                  string                `json:"listen"`
+	LogLevel                string                `json:"log_level"`                          // debug, info, warn, error (default: info)
+	LogFile                 string                `json:"log_file"`                           // path to log file (default: stderr)
+	LogMaxSizeMB            int                   `json:"log_max_size_mb"`                    // max log file size in MB before rotation (default: 10)
+	LogMaxFiles             int                   `json:"log_max_files"`                      // number of rotated files to keep (default: 3)
+	CacheDir                string                `json:"cache_dir"`                          // directory for persistent tools cache (default: alongside config)
+	MaxDescLen              int                   `json:"max_description_length"`             // truncate tool descriptions to this length (0 = no truncation)
+	Discovery               *bool                 `json:"discovery"`                          // global discovery toggle: nil=auto, true=force, false=disable for all backends
+	Env                     map[string]string     `json:"env"`                                // global environment variables for all backends
+	CABundle                *CABundleConfig       `json:"ca_bundle"`                          // optional CA bundle management (see CABundleConfig)
+	AuthTokens              []string              `json:"auth_tokens"`                        // global bearer tokens (used when backend has no own tokens)
+	IdleTimeout             int                   `json:"idle_timeout_seconds"`               // kill backends idle for this long (0 = never)
+	SelfIdleTimeout         int                   `json:"self_idle_timeout_seconds"`          // kill gateway itself after this long with no requests (0 = never)
+	CredentialTTLSoftMargin int                   `json:"credential_ttl_soft_margin_seconds"` // recycle (defer-if-busy) this long before credential expiry (0 = default 300)
+	CredentialTTLHardGuard  int                   `json:"credential_ttl_hard_guard_seconds"`  // force-recycle this long before credential expiry (0 = default 120)
+	BackendsFile            string                `json:"backends_file"`                      // path to backends.json (relative to config dir)
+	Backends                map[string]BackendDef `json:"backends"`
 }
 
 // BackendDef defines a backend MCP subprocess or remote server.
@@ -87,15 +99,28 @@ type Backend struct {
 	globalEnv map[string]string
 	cacheDir  string // directory for persistent cache files
 
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     *bufio.Reader
-	pending    map[string]chan json.RawMessage // id string -> response channel
-	running    bool
-	cancelFn   context.CancelFunc
-	lastUsed   time.Time       // last time a request was forwarded
-	toolsCache json.RawMessage // cached tools/list response (nil = no cache)
+	mu            sync.Mutex
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	stdout        *bufio.Reader
+	pending       map[string]chan json.RawMessage // id string -> response channel
+	running       bool
+	cancelFn      context.CancelFunc
+	lastUsed      time.Time       // last time a request was forwarded
+	toolsCache    json.RawMessage // cached tools/list response (nil = no cache)
+	toolsCachePid int             // pid of the backend that produced the cache
+
+	// Credential TTL watcher state. A backend may emit a stderr sentinel
+	// "[[gateway:credential_expiry]] <unix-epoch>" after spawn, declaring when
+	// its injected credential (e.g. an SSO session cookie) expires. The gateway
+	// then recycles the backend before that time so the next spawn fetches a
+	// fresh credential. Guarded by b.mu.
+	credentialExpiry time.Time     // zero = no credential expiry declared
+	ttlSoftMargin    time.Duration // recycle (defer-if-busy) at expiry-softMargin
+	ttlHardGuard     time.Duration // force-recycle (even if busy) at expiry-hardGuard
+	softTimer        *time.Timer   // fires at the soft deadline
+	hardTimer        *time.Timer   // fires at the hard deadline
+	pendingTTLKill   bool          // soft deadline reached while busy; recycle when idle
 
 	// Remote backend state
 	httpClient *http.Client                    // shared HTTP client for remote backends
@@ -134,7 +159,7 @@ func main() {
 	// Handle --version / -v flag
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("mcp-gateway %s (%s) built %s\n", Version, Commit, BuildDate)
-		os.Exit(0)
+		os.Exit(exitOK)
 	}
 
 	configPath := resolveConfigPath()
@@ -142,24 +167,34 @@ func main() {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		slog.Error("failed to load config", "path", configPath, "error", err)
-		os.Exit(1)
+		os.Exit(exitFailure)
 	}
 
 	// Configure logging
 	if logErr := initLogging(cfg, configPath); logErr != nil {
 		fmt.Fprintf(os.Stderr, "logging setup failed: %v\n", logErr)
-		os.Exit(1)
+		os.Exit(exitFailure)
 	}
 
 	// Single-instance check: if already running, verify and exit.
 	if existingOK := checkExistingInstance(cfg.Listen); existingOK {
 		fmt.Printf("mcp-gateway already running on %s\n", cfg.Listen)
-		os.Exit(0)
+		os.Exit(exitOK)
 	}
 
 	// Write pidfile
 	pidFile := writePidFile()
 	defer os.Remove(pidFile)
+
+	// Resolve the optional CA bundle and inject its path into all backends'
+	// environment. Company/OS specifics live entirely in the configured
+	// generate command; the gateway only dispatches and injects.
+	caEnv, caErr := resolveCABundleEnv(cfg.CABundle)
+	if caErr != nil {
+		slog.Error("CA bundle required but unavailable", "error", caErr)
+		os.Exit(exitCABundleFailed)
+	}
+	cfg.Env = mergeCAEnv(cfg.Env, caEnv)
 
 	gw := newGateway(cfg)
 
@@ -178,7 +213,7 @@ func main() {
 	ln, err := getListener(cfg.Listen)
 	if err != nil {
 		slog.Error("listener failed", "error", err)
-		os.Exit(1)
+		os.Exit(exitFailure)
 	}
 
 	// Graceful shutdown
@@ -209,7 +244,7 @@ func main() {
 	slog.Info("mcp-gateway started", "version", Version, "commit", Commit, "addr", ln.Addr().String(), "pid", os.Getpid())
 	if err := server.Serve(ln); err != http.ErrServerClosed {
 		slog.Error("server error", "error", err)
-		os.Exit(1)
+		os.Exit(exitFailure)
 	}
 }
 
@@ -344,14 +379,16 @@ func newGateway(cfg Config) *Gateway {
 			def.Discovery = cfg.Discovery
 		}
 		b := &Backend{
-			name:        name,
-			def:         def,
-			globalEnv:   cfg.Env,
-			cacheDir:    cfg.CacheDir,
-			maxDescLen:  cfg.MaxDescLen,
-			pending:     make(map[string]chan json.RawMessage),
-			activeTools: make(map[string]bool),
-			logEnabled:  def.LogEnabled == nil || *def.LogEnabled,
+			name:          name,
+			def:           def,
+			globalEnv:     cfg.Env,
+			cacheDir:      cfg.CacheDir,
+			maxDescLen:    cfg.MaxDescLen,
+			pending:       make(map[string]chan json.RawMessage),
+			activeTools:   make(map[string]bool),
+			logEnabled:    def.LogEnabled == nil || *def.LogEnabled,
+			ttlSoftMargin: time.Duration(cfg.CredentialTTLSoftMargin) * time.Second,
+			ttlHardGuard:  time.Duration(cfg.CredentialTTLHardGuard) * time.Second,
 		}
 		if def.URL != "" {
 			b.httpClient = &http.Client{Timeout: 120 * time.Second}
@@ -510,7 +547,6 @@ func loadConfig(path string) (Config, error) {
 	}
 	return cfg, nil
 }
-
 
 // selfIdleTimer exits the gateway if no requests have been received for the given duration.
 func (gw *Gateway) selfIdleTimer(ctx context.Context, stop context.CancelFunc, timeout time.Duration) {
@@ -1124,7 +1160,14 @@ func (b *Backend) spawnProcess() error {
 		return ErrStdoutPipe.Parse(errors.WithError(err))
 	}
 
-	cmd.Stderr = os.Stderr
+	// Capture stderr so we can watch for the credential-expiry sentinel while
+	// still forwarding all stderr output to the gateway's own stderr (keeps
+	// backend logs visible for debugging).
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return ErrStderrPipe.Parse(errors.WithError(err))
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -1137,11 +1180,136 @@ func (b *Backend) spawnProcess() error {
 	b.pending = make(map[string]chan json.RawMessage)
 	b.running = true
 
-	slog.Info("backend started", "backend", b.name, "pid", cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	slog.Info("backend started", "backend", b.name, "pid", pid)
 
 	go b.readLoop()
+	go b.scanStderr(stderr, pid)
 	go b.waitForExit(cmd)
 	return nil
+}
+
+// credentialExpirySentinel is the stderr marker a backend emits to declare when
+// its injected credential expires: "[[gateway:credential_expiry]] <unix-epoch>".
+const credentialExpirySentinel = "[[gateway:credential_expiry]]"
+
+// scanStderr forwards backend stderr to the gateway's stderr and watches for the
+// credential-expiry sentinel, arming the TTL watcher when it appears. pid is the
+// process this scanner belongs to, used to guard against a stale scanner arming
+// timers for an already-respawned backend.
+func (b *Backend) scanStderr(r io.Reader, pid int) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		// Always forward to our own stderr for debuggability.
+		_, _ = os.Stderr.Write(append(append([]byte(nil), line...), '\n'))
+
+		idx := bytes.Index(line, []byte(credentialExpirySentinel))
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(string(line[idx+len(credentialExpirySentinel):]))
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		epoch, perr := strconv.ParseInt(fields[0], 10, 64)
+		if perr != nil || epoch <= 0 {
+			slog.Warn("invalid credential_expiry sentinel", "backend", b.name, "value", rest)
+			continue
+		}
+		b.armCredentialTTL(time.Unix(epoch, 0), pid)
+	}
+}
+
+// armCredentialTTL sets the credential expiry and arms the soft and hard timers.
+// Margins default to 5min (soft) and 2min (hard) if unset. pid guards against a
+// timer killing a newer, respawned backend.
+func (b *Backend) armCredentialTTL(expiry time.Time, pid int) {
+	soft := b.ttlSoftMargin
+	if soft <= 0 {
+		soft = 5 * time.Minute
+	}
+	hard := b.ttlHardGuard
+	if hard <= 0 {
+		hard = 2 * time.Minute
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Ignore if this scanner belongs to a superseded process.
+	if b.cmd == nil || b.cmd.Process == nil || b.cmd.Process.Pid != pid {
+		return
+	}
+
+	b.credentialExpiry = expiry
+	if b.softTimer != nil {
+		b.softTimer.Stop()
+	}
+	if b.hardTimer != nil {
+		b.hardTimer.Stop()
+	}
+
+	now := time.Now()
+	softDelay := expiry.Add(-soft).Sub(now)
+	hardDelay := expiry.Add(-hard).Sub(now)
+	if softDelay < 0 {
+		softDelay = 0
+	}
+	if hardDelay < 0 {
+		hardDelay = 0
+	}
+
+	b.softTimer = time.AfterFunc(softDelay, func() { b.onSoftDeadline(pid) })
+	b.hardTimer = time.AfterFunc(hardDelay, func() { b.onHardDeadline(pid) })
+	slog.Info("credential TTL armed", "backend", b.name,
+		"expiry", expiry.Format(time.RFC3339),
+		"soft_in", softDelay.Round(time.Second), "hard_in", hardDelay.Round(time.Second))
+}
+
+// onSoftDeadline recycles the backend if idle, or defers the recycle until the
+// in-flight requests drain (see dispatchResponse).
+func (b *Backend) onSoftDeadline(pid int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.ttlOwnsProcess(pid) {
+		return
+	}
+	if len(b.pending) == 0 {
+		slog.Info("credential TTL soft deadline: recycling idle backend", "backend", b.name)
+		b.recycleLocked()
+		return
+	}
+	slog.Info("credential TTL soft deadline: backend busy, deferring recycle", "backend", b.name, "in_flight", len(b.pending))
+	b.pendingTTLKill = true
+}
+
+// onHardDeadline force-recycles the backend even if requests are in flight.
+func (b *Backend) onHardDeadline(pid int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.ttlOwnsProcess(pid) {
+		return
+	}
+	slog.Info("credential TTL hard deadline: force-recycling backend", "backend", b.name, "in_flight", len(b.pending))
+	b.recycleLocked()
+}
+
+// ttlOwnsProcess reports whether the current process matches the pid a timer was
+// armed for. Must be called with b.mu held.
+func (b *Backend) ttlOwnsProcess(pid int) bool {
+	return b.running && b.cmd != nil && b.cmd.Process != nil && b.cmd.Process.Pid == pid
+}
+
+// recycleLocked cancels the subprocess context so it terminates. The next request
+// re-spawns it with a fresh credential. Must be called with b.mu held.
+func (b *Backend) recycleLocked() {
+	if b.cancelFn != nil {
+		b.cancelFn()
+	}
+	b.running = false
 }
 
 // waitForExit waits for the subprocess to exit and cleans up pending requests.
@@ -1153,6 +1321,18 @@ func (b *Backend) waitForExit(cmd *exec.Cmd) {
 		close(ch)
 		delete(b.pending, id)
 	}
+	// Tear down the credential-TTL watcher. This is the single teardown path for
+	// every exit reason (idle reap, crash, manual kill, TTL recycle), so no
+	// orphan timer can outlive the process.
+	if b.softTimer != nil {
+		b.softTimer.Stop()
+		b.softTimer = nil
+	}
+	if b.hardTimer != nil {
+		b.hardTimer.Stop()
+		b.hardTimer = nil
+	}
+	b.pendingTTLKill = false
 	b.mu.Unlock()
 	if waitErr != nil {
 		slog.Warn("backend process exited with error", "backend", b.name, "error", waitErr)
@@ -1194,6 +1374,10 @@ func (b *Backend) initializeBackend() error {
 		}
 	}
 	b.mu.Unlock()
+
+	// Refresh tools cache if this is a new backend process
+	b.refreshToolsCache()
+
 	return nil
 }
 
@@ -1305,6 +1489,13 @@ func (b *Backend) dispatchResponse(line []byte) {
 	ch, ok := b.pending[idKey]
 	if ok {
 		delete(b.pending, idKey)
+	}
+	// If a credential-TTL recycle was deferred because the backend was busy,
+	// and this was the last in-flight request, recycle now.
+	if b.pendingTTLKill && len(b.pending) == 0 {
+		slog.Info("credential TTL: in-flight requests drained, recycling backend", "backend", b.name)
+		b.pendingTTLKill = false
+		b.recycleLocked()
 	}
 	b.mu.Unlock()
 
@@ -1431,6 +1622,48 @@ func (b *Backend) saveToolsCache() {
 	} else {
 		slog.Debug("tools cache saved to disk", "backend", b.name, "path", path)
 	}
+}
+
+// refreshToolsCache fetches tools/list from the live backend and updates the cache
+// if this backend process hasn't already refreshed it (tracked by pid).
+func (b *Backend) refreshToolsCache() {
+	b.mu.Lock()
+	pid := 0
+	if b.cmd != nil && b.cmd.Process != nil {
+		pid = b.cmd.Process.Pid
+	}
+	if pid == 0 || pid == b.toolsCachePid {
+		b.mu.Unlock()
+		return
+	}
+	b.mu.Unlock()
+
+	toolsMsg := []byte(`{"jsonrpc":"2.0","id":"_gw_tools","method":"tools/list","params":{}}`)
+	resp, err := b.send(context.Background(), toolsMsg)
+	if err != nil {
+		slog.Warn("failed to refresh tools cache", "backend", b.name, "error", err)
+		return
+	}
+
+	// Verify it's a valid tools/list response
+	var check struct {
+		Result *struct {
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(resp, &check) != nil || check.Result == nil {
+		slog.Warn("tools cache refresh got invalid response", "backend", b.name)
+		return
+	}
+
+	b.mu.Lock()
+	b.toolsCache = json.RawMessage(resp)
+	b.toolsCachePid = pid
+	b.mu.Unlock()
+
+	b.saveToolsCache()
+	b.buildCategories()
+	slog.Info("tools cache refreshed from live backend", "backend", b.name, "pid", pid, "tools", len(check.Result.Tools))
 }
 
 // logInfo logs at info level if logging is enabled for this backend.
