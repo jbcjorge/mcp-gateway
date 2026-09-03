@@ -1,5 +1,8 @@
 # Build stage
-FROM golang:1.26-alpine AS build
+# GO_VERSION is injected by CI from go.mod (single source of truth). The default
+# is a fallback for a plain local `docker build` without the build-arg.
+ARG GO_VERSION=1.27.0
+FROM golang:${GO_VERSION}-alpine AS build
 
 RUN apk add --no-cache ca-certificates
 
