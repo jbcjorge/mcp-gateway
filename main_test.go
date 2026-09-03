@@ -1021,41 +1021,52 @@ func TestSubprocessHelper(t *testing.T) {
 	if exp := os.Getenv("TEST_CRED_EXPIRY"); exp != "" {
 		fmt.Fprintf(os.Stderr, "[[gateway:credential_expiry]] %s\n", exp)
 	}
-	// Optional per-response delay (milliseconds) to simulate an in-flight request.
-	var respDelay time.Duration
-	if d := os.Getenv("TEST_RESP_DELAY_MS"); d != "" {
-		if ms, err := strconv.Atoi(d); err == nil {
-			respDelay = time.Duration(ms) * time.Millisecond
-		}
-	}
+	respDelay := subprocessRespDelay()
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		var msg struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-		}
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
-		if msg.ID == nil {
-			continue // notification, no response needed
-		}
-		// For tools/list, return a fake tools array
-		if msg.Method == "tools/list" {
-			resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"get_users","description":"Get users"},{"name":"create_issue","description":"Create issue"},{"name":"delete_repo","description":"Delete repo"},{"name":"search_code","description":"Search code"},{"name":"list_items","description":"List items"},{"name":"update_thing","description":"Update thing"},{"name":"custom_action","description":"Custom action"}]}}`, string(*msg.ID))
-			fmt.Println(resp)
-		} else {
-			if respDelay > 0 {
-				time.Sleep(respDelay)
-			}
-			resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{}}`, string(*msg.ID))
+		if resp, ok := subprocessHandleLine(scanner.Text(), respDelay); ok {
 			fmt.Println(resp)
 		}
 	}
+}
+
+// subprocessRespDelay reads the optional per-response delay used to simulate an
+// in-flight request.
+func subprocessRespDelay() time.Duration {
+	d := os.Getenv("TEST_RESP_DELAY_MS")
+	if d == "" {
+		return 0
+	}
+	ms, err := strconv.Atoi(d)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// subprocessHandleLine parses one JSON-RPC line and returns the response to
+// print (ok=false means no response: blank line, parse error, or notification).
+func subprocessHandleLine(line string, respDelay time.Duration) (string, bool) {
+	if line == "" {
+		return "", false
+	}
+	var msg struct {
+		ID     *json.RawMessage `json:"id"`
+		Method string           `json:"method"`
+	}
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		return "", false
+	}
+	if msg.ID == nil {
+		return "", false // notification, no response needed
+	}
+	if msg.Method == "tools/list" {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"get_users","description":"Get users"},{"name":"create_issue","description":"Create issue"},{"name":"delete_repo","description":"Delete repo"},{"name":"search_code","description":"Search code"},{"name":"list_items","description":"List items"},{"name":"update_thing","description":"Update thing"},{"name":"custom_action","description":"Custom action"}]}}`, string(*msg.ID)), true
+	}
+	if respDelay > 0 {
+		time.Sleep(respDelay)
+	}
+	return fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{}}`, string(*msg.ID)), true
 }
 
 // subprocessCommand returns the command to run the test binary as a fake MCP subprocess.
