@@ -47,47 +47,61 @@ func newCompositionConfig() *CompositionConfig {
 	}
 }
 
-func TestResolveRoutes_Success(t *testing.T) {
-	cfg := newCompositionConfig()
-	routes, err := resolveRoutes(cfg)
+func resolveByName(t *testing.T) map[string]ResolvedRoute {
+	t.Helper()
+	routes, err := resolveRoutes(newCompositionConfig())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(routes) != 3 {
-		t.Fatalf("expected 3 routes, got %d", len(routes))
-	}
-
 	byName := map[string]ResolvedRoute{}
 	for _, r := range routes {
 		byName[r.Name] = r
 	}
+	return byName
+}
 
-	// Composition route: two members in order, second carries include filter.
-	wiki, ok := byName["wiki"]
+func TestResolveRoutes_Count(t *testing.T) {
+	routes, err := resolveRoutes(newCompositionConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 3 {
+		t.Fatalf("expected 3 routes, got %d", len(routes))
+	}
+}
+
+func TestResolveRoutes_CompositionMembersOrderedAndFiltered(t *testing.T) {
+	wiki, ok := resolveByName(t)["wiki"]
 	if !ok {
 		t.Fatal("wiki route missing")
 	}
 	if len(wiki.Members) != 2 {
 		t.Fatalf("wiki should have 2 members, got %d", len(wiki.Members))
 	}
-	if wiki.Members[0].ServerName != "conf-official" || wiki.Members[1].ServerName != "conf-legacy" {
-		t.Errorf("wiki member order wrong: %+v", wiki.Members)
+	if wiki.Members[0].ServerName != "conf-official" {
+		t.Errorf("member[0] = %q, want conf-official", wiki.Members[0].ServerName)
 	}
-	if len(wiki.Members[1].IncludeTools) != 1 || wiki.Members[1].IncludeTools[0] != "confluence_remove_label" {
-		t.Errorf("member include filter not applied: %+v", wiki.Members[1])
+	if wiki.Members[1].ServerName != "conf-legacy" {
+		t.Errorf("member[1] = %q, want conf-legacy", wiki.Members[1].ServerName)
+	}
+	inc := wiki.Members[1].IncludeTools
+	if len(inc) != 1 || inc[0] != "confluence_remove_label" {
+		t.Errorf("member include filter not applied: %v", inc)
 	}
 	if wiki.Prefix != "" {
 		t.Errorf("wiki should have no prefix, got %q", wiki.Prefix)
 	}
+}
 
-	// Plain server route: single member, no prefix.
-	own := byName["my-own"]
+func TestResolveRoutes_PlainServerRoute(t *testing.T) {
+	own := resolveByName(t)["my-own"]
 	if len(own.Members) != 1 || own.Members[0].ServerName != "my-own" {
 		t.Errorf("my-own should be single-member server route: %+v", own)
 	}
+}
 
-	// Plain server route WITH prefix.
-	co := byName["conf-official"]
+func TestResolveRoutes_PlainServerRouteWithPrefix(t *testing.T) {
+	co := resolveByName(t)["conf-official"]
 	if co.Prefix != "co_" {
 		t.Errorf("conf-official route prefix = %q, want co_", co.Prefix)
 	}
