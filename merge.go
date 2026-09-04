@@ -28,42 +28,59 @@ type itemOwner struct {
 //
 // Returns the merged result object ({listKey: [...]}) and the ownership map.
 func mergeLists(members []memberList, listKey, itemKey, prefix string) (json.RawMessage, map[string]itemOwner, error) {
-	// order preserves first-seen position; last-wins replaces the item in place.
 	order := []string{}
 	items := map[string]map[string]any{} // realName -> item object
 	owners := map[string]itemOwner{}
 
 	for _, ml := range members {
-		if len(ml.result) == 0 {
-			continue
-		}
-		var wrapper map[string]json.RawMessage
-		if err := json.Unmarshal(ml.result, &wrapper); err != nil {
-			return nil, nil, ErrMergeParse.Parse(errors.WithError(err))
-		}
-		rawList, ok := wrapper[listKey]
-		if !ok {
-			continue // this member exposes nothing for this family
-		}
-		var arr []map[string]any
-		if err := json.Unmarshal(rawList, &arr); err != nil {
-			return nil, nil, ErrMergeParse.Parse(errors.WithError(err))
-		}
-		for _, it := range arr {
-			key, _ := it[itemKey].(string)
-			if key == "" {
-				continue
-			}
-			if _, seen := items[key]; !seen {
-				order = append(order, key)
-			}
-			items[key] = it // last-wins
-			owners[key] = itemOwner{member: ml.member, realName: key}
+		if err := ingestMember(ml, listKey, itemKey, &order, items, owners); err != nil {
+			return nil, nil, err
 		}
 	}
 
-	// Build merged array in first-seen order, applying prefix and finalizing the
-	// ownership map keyed by display name.
+	out, finalOwners := finalizeMerged(order, items, owners, itemKey, prefix)
+	merged, err := json.Marshal(map[string]any{listKey: out})
+	if err != nil {
+		return nil, nil, ErrMergeParse.Parse(errors.WithError(err))
+	}
+	return merged, finalOwners, nil
+}
+
+// ingestMember parses one member's list result and folds its items into the
+// accumulating order/items/owners (last-wins on collision).
+func ingestMember(ml memberList, listKey, itemKey string, order *[]string, items map[string]map[string]any, owners map[string]itemOwner) error {
+	if len(ml.result) == 0 {
+		return nil
+	}
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal(ml.result, &wrapper); err != nil {
+		return ErrMergeParse.Parse(errors.WithError(err))
+	}
+	rawList, ok := wrapper[listKey]
+	if !ok {
+		return nil // member exposes nothing for this family
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal(rawList, &arr); err != nil {
+		return ErrMergeParse.Parse(errors.WithError(err))
+	}
+	for _, it := range arr {
+		key, _ := it[itemKey].(string)
+		if key == "" {
+			continue
+		}
+		if _, seen := items[key]; !seen {
+			*order = append(*order, key)
+		}
+		items[key] = it // last-wins
+		owners[key] = itemOwner{member: ml.member, realName: key}
+	}
+	return nil
+}
+
+// finalizeMerged builds the ordered output array, applying the optional prefix
+// and producing the display-name-keyed ownership map.
+func finalizeMerged(order []string, items map[string]map[string]any, owners map[string]itemOwner, itemKey, prefix string) ([]map[string]any, map[string]itemOwner) {
 	finalOwners := map[string]itemOwner{}
 	out := make([]map[string]any, 0, len(order))
 	for _, key := range order {
@@ -71,7 +88,6 @@ func mergeLists(members []memberList, listKey, itemKey, prefix string) (json.Raw
 		display := key
 		if prefix != "" {
 			display = prefix + key
-			// clone item and rewrite its key field to the display name
 			clone := make(map[string]any, len(it))
 			for k, v := range it {
 				clone[k] = v
@@ -82,10 +98,5 @@ func mergeLists(members []memberList, listKey, itemKey, prefix string) (json.Raw
 		out = append(out, it)
 		finalOwners[display] = owners[key]
 	}
-
-	merged, err := json.Marshal(map[string]any{listKey: out})
-	if err != nil {
-		return nil, nil, ErrMergeParse.Parse(errors.WithError(err))
-	}
-	return merged, finalOwners, nil
+	return out, finalOwners
 }
