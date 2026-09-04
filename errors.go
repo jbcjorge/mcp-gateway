@@ -53,6 +53,7 @@ var (
 	ErrCABundleMissing     = errors.New("required CA bundle missing or unreadable")
 	ErrRouteUnknown        = errors.New("backends route references unknown server or composition: %s")
 	ErrMemberServerUnknown = errors.New("composition member references unknown server: %s")
+	ErrMergeParse          = errors.New("failed to parse member list for merge")
 	ErrCmdStart            = errors.New("failed to start command")
 	ErrWritePipe           = errors.New("failed to write to backend")
 	ErrParseMsgID          = errors.New("failed to parse message id")
