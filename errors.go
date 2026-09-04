@@ -47,13 +47,15 @@ var (
 
 // Subprocess errors
 var (
-	ErrStdinPipe       = errors.New("stdin pipe failed")
-	ErrStdoutPipe      = errors.New("stdout pipe failed")
-	ErrStderrPipe      = errors.New("stderr pipe failed")
-	ErrCABundleMissing = errors.New("required CA bundle missing or unreadable")
-	ErrCmdStart        = errors.New("failed to start command")
-	ErrWritePipe       = errors.New("failed to write to backend")
-	ErrParseMsgID      = errors.New("failed to parse message id")
+	ErrStdinPipe           = errors.New("stdin pipe failed")
+	ErrStdoutPipe          = errors.New("stdout pipe failed")
+	ErrStderrPipe          = errors.New("stderr pipe failed")
+	ErrCABundleMissing     = errors.New("required CA bundle missing or unreadable")
+	ErrRouteUnknown        = errors.New("backends route references unknown server or composition: %s")
+	ErrMemberServerUnknown = errors.New("composition member references unknown server: %s")
+	ErrCmdStart            = errors.New("failed to start command")
+	ErrWritePipe           = errors.New("failed to write to backend")
+	ErrParseMsgID          = errors.New("failed to parse message id")
 )
 
 // Remote backend errors
