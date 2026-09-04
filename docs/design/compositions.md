@@ -207,6 +207,12 @@ concern, unchanged by compositions.
 
 - Member restart / tool-set change: background re-initialize + emit
   `notifications/tools/list_changed` with the updated merged list.
+- **Per-member tool rename** (e.g. member map `{"search_doc": "search_document"}`),
+  applied before merge, to control the *surviving name* when forcing a collision
+  across differently-named tools. For now, use `exclude_tools` to drop the
+  unwanted duplicate (controls surviving implementation, not its name). Rename
+  adds a second name-translation layer in the call path, so it is its own
+  increment.
 
 ## Testing plan (TDD, no company/OS deps)
 
