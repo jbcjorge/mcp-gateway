@@ -214,6 +214,33 @@ concern, unchanged by compositions.
   adds a second name-translation layer in the call path, so it is its own
   increment.
 
+## Implementation status
+
+Completed (on main, CI green):
+- Increment 1: config schema (`servers`/`compositions`/`backends`) + lazy
+  `resolveRoutes` (composition.go).
+- Increment 2a: generic `mergeLists` (last-wins + prefix + ownership map)
+  (merge.go).
+- Increment 2b: `Route` abstraction (merged tools/list, owner lookup, call
+  name-rewrite) (route.go).
+
+Remaining — Increment 2c (Gateway wiring; changes live routing):
+1. `loadConfig`: parse the new `CompositionConfig` shape instead of the flat
+   `map[string]BackendDef`.
+2. `newGateway`: call `resolveRoutes`; instantiate one `*Backend` per member
+   (unique key e.g. `<route>/<server>`), register members in `gw.backends` (so
+   reaper/TTL/shutdown keep working), build `gw.routes[name]`.
+3. `NewBearerAuthorizer`: auth keyed by route name.
+4. `handleRequest`: resolve `gw.routes[path]`.
+5. `handleLocally`: serve merged tools/list from the route.
+6. `forwardToBackend`: tools/call → owner dispatch + name rewrite; other list
+   methods merge (extend to resources/prompts); other methods → primary.
+7. health/`_restart`: per route (+ members).
+8. Migrate live backends.json 1:1 to new schema; verify wiki/askthedev.
+9. Update resources/config.json example + README.
+
+Single-member routes must behave exactly like today.
+
 ## Testing plan (TDD, no company/OS deps)
 
 - Config parse: new shape; object vs string `backends` entries; legacy flat map
