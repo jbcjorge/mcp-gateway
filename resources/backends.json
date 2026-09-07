@@ -1,1 +1,35 @@
-{}
+{
+  "servers": {
+    "github": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_TOKEN": "ghp_..."},
+      "exclude_tools": ["create_or_update_file", "delete_*"]
+    },
+    "docs-official": {
+      "command": ["my-docs-server"]
+    },
+    "docs-extra": {
+      "command": ["my-inhouse-docs-server"]
+    },
+    "remote-api": {
+      "url": "https://mcp.example.com/mcp",
+      "transport_type": "streamable-http",
+      "headers": {"Authorization": "Bearer remote-token"}
+    }
+  },
+
+  "compositions": {
+    "docs": {
+      "members": [
+        {"server": "docs-official"},
+        {"server": "docs-extra", "include_tools": ["extra_tool"]}
+      ]
+    }
+  },
+
+  "backends": [
+    "docs",
+    {"route": "github", "prefix": "gh_"},
+    "remote-api"
+  ]
+}

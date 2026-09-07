@@ -15,6 +15,7 @@ A zero-ops MCP server manager. Spawns, routes, and recycles MCP backends on dema
 - **CA bundle injection** - optionally generate and inject a CA bundle into every backend (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`), regenerated only when the trust store actually changes
 - **Bearer auth** - global and per-backend token authentication
 - **Tool filtering** - include/exclude glob patterns per backend
+- **Composite backends** - combine multiple servers under one route with last-wins tool override, plus optional per-route tool prefixing to avoid client-side name collisions
 - **Tool discovery** - automatic category-based tool activation for large backends
 - **Description truncation** - configurable max length for verbose tool descriptions
 - **Health endpoint** - per-backend status, PID, idle time
@@ -91,26 +92,72 @@ go install github.com/jbcjorge/mcp-gateway@latest
 
 ### backends.json
 
+The backend topology has three sections:
+
+- **`servers`** — reusable backend *definitions* (templates). Inert until routed.
+- **`compositions`** — named, ordered lists of members that combine servers.
+- **`backends`** — the *routes* actually exposed at `/<name>/mcp`. Each entry
+  names a server or a composition, and may carry an optional `prefix`.
+
+Only entries listed in `backends` become routes. Servers/compositions not
+referenced by any route are never started (lazy resolution). A server may be
+reused by multiple routes/compositions; each use is an independent instance.
+
 ```json
 {
-  "github": {
-    "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
-    "env": {"GITHUB_TOKEN": "ghp_..."},
-    "exclude_tools": ["create_or_update_file", "delete_*"]
+  "servers": {
+    "github": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_TOKEN": "ghp_..."},
+      "exclude_tools": ["create_or_update_file", "delete_*"]
+    },
+    "docs-official": { "command": ["my-docs-server"] },
+    "docs-extra":    { "command": ["my-inhouse-docs-server"] },
+    "remote-api": {
+      "url": "https://mcp.example.com/mcp",
+      "transport_type": "streamable-http",
+      "headers": {"Authorization": "Bearer remote-token"}
+    }
   },
-  "remote-api": {
-    "url": "https://mcp.example.com/mcp",
-    "transport_type": "streamable-http",
-    "headers": {"Authorization": "Bearer remote-token"}
+
+  "compositions": {
+    "docs": {
+      "members": [
+        {"server": "docs-official"},
+        {"server": "docs-extra", "include_tools": ["extra_tool"]}
+      ]
+    }
   },
-  "disabled-backend": {
-    "command": ["echo"],
-    "disabled": true
-  }
+
+  "backends": [
+    "docs",
+    {"route": "github", "prefix": "gh_"},
+    "remote-api"
+  ]
 }
 ```
 
-### Backend types
+### Routes (`backends`)
+
+Each entry is either a bare string (route name, no prefix) or an object
+`{ "route": "<name>", "prefix": "<string>" }`. The route name must reference a
+server or a composition.
+
+- **`prefix`** (optional): advertise this route's tool names as `<prefix><name>`
+  and translate back on call. Use it to avoid tool-name collisions when a client
+  consumes multiple routes at once. Default: no prefix (names unchanged).
+
+### Compositions
+
+A composition merges the tool lists of its ordered members under one route.
+
+- Members are merged in order; on a **tool-name collision the last member wins**
+  (intentional override / supplement). tools/call is routed to the owning member.
+- Each member may add its own `include_tools` / `exclude_tools` on top of the
+  server's own filters.
+- Resources and prompts merge with the same last-wins rule.
+
+### Backend types (servers)
 
 | Type | Detection | Description |
 |------|-----------|-------------|
@@ -118,7 +165,7 @@ go install github.com/jbcjorge/mcp-gateway@latest
 | SSE | `url` field, no `transport_type` or `"sse"` | Connects to a remote SSE MCP server |
 | Streamable HTTP | `url` field + `"transport_type": "streamable-http"` | Connects to a remote HTTP MCP server |
 
-### Backend options
+### Server options
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -127,13 +174,12 @@ go install github.com/jbcjorge/mcp-gateway@latest
 | `transport_type` | `string` | `"sse"` or `"streamable-http"` (auto-detected if omitted) |
 | `env` | `map` | Environment variables for subprocess |
 | `headers` | `map` | HTTP headers for remote connections |
-| `auth_tokens` | `[]string` | Bearer tokens (overrides global) |
+| `auth_tokens` | `[]string` | Client→gateway bearer tokens for the route (overrides global) |
 | `include_tools` | `[]string` | Glob patterns for tools to expose |
 | `exclude_tools` | `[]string` | Glob patterns for tools to block |
 | `discovery` | `bool` | Force enable/disable tool discovery |
 | `categories` | `map` | Manual tool category assignments |
 | `log_enabled` | `bool` | Per-backend logging toggle |
-| `disabled` | `bool` | Skip this backend entirely |
 
 ## CA bundle injection
 

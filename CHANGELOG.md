@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Composite backends (compositions).** A route can now combine multiple
+  servers under one namespace. Tool lists (and resources/prompts) merge across
+  members with **last-one-wins** on name collision (intentional override); tool
+  calls route to the owning member. See `docs/design/compositions.md`.
+- **Route-level tool prefixing.** A `backends` route entry may set
+  `{"route": "<name>", "prefix": "<string>"}` to advertise its tools as
+  `<prefix><tool>` (translated back on call), avoiding client-side collisions
+  when consuming multiple routes.
+
+### Changed
+
+- **BREAKING: backends config schema.** The flat `{name: def}` map is replaced by
+  `{ "servers": {...}, "compositions": {...}, "backends": [...] }`. `servers` and
+  `compositions` are definitions; only `backends` entries are exposed as routes
+  (lazy resolution — unreferenced definitions are never started). The `disabled`
+  field is gone: to disable a backend, omit it from `backends`. Client→gateway
+  auth is keyed by route.
+
 ## [0.2.0]
 
 ### Added
