@@ -145,13 +145,52 @@ func (gw *Gateway) compositeToolsList(ctx context.Context, route *Route, id *jso
 		if uerr := json.Unmarshal(resp, &env); uerr != nil {
 			return nil, uerr
 		}
-		return env.Result, nil
+		// Apply this member's include/exclude tool filters before merging.
+		return filterResultTools(env.Result, b), nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	reply, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": json.RawMessage(merged)})
 	return reply, nil
+}
+
+// filterResultTools returns a copy of a tools/list result with tools that fail
+// the backend's include/exclude filters removed. If parsing fails or there are
+// no filters, the result is returned unchanged.
+func filterResultTools(result json.RawMessage, b *Backend) json.RawMessage {
+	if len(b.def.IncludeTools) == 0 && len(b.def.ExcludeTools) == 0 {
+		return result
+	}
+	var wrapper map[string]json.RawMessage
+	if json.Unmarshal(result, &wrapper) != nil {
+		return result
+	}
+	rawTools, ok := wrapper["tools"]
+	if !ok {
+		return result
+	}
+	var tools []map[string]any
+	if json.Unmarshal(rawTools, &tools) != nil {
+		return result
+	}
+	kept := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
+		name, _ := t["name"].(string)
+		if b.toolAllowed(name) {
+			kept = append(kept, t)
+		}
+	}
+	keptJSON, err := json.Marshal(kept)
+	if err != nil {
+		return result
+	}
+	wrapper["tools"] = keptJSON
+	out, err := json.Marshal(wrapper)
+	if err != nil {
+		return result
+	}
+	return out
 }
 
 // compositeToolsCall routes a tools/call to the owning member, stripping the
