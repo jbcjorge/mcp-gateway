@@ -6,12 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Added
 
 - **Composite backends (compositions).** A route can now combine multiple
   servers under one namespace. Tool lists (and resources/prompts) merge across
   members with **last-one-wins** on name collision (intentional override); tool
-  calls route to the owning member. See `docs/design/compositions.md`.
+  calls route to the owning member. Each member's `include_tools`/`exclude_tools`
+  filters are applied before merging. See `docs/design/compositions.md`.
 - **Route-level tool prefixing.** A `backends` route entry may set
   `{"route": "<name>", "prefix": "<string>"}` to advertise its tools as
   `<prefix><tool>` (translated back on call), avoiding client-side collisions
@@ -25,6 +28,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (lazy resolution — unreferenced definitions are never started). The `disabled`
   field is gone: to disable a backend, omit it from `backends`. Client→gateway
   auth is keyed by route.
+- Internal: `main.go`/`main_test.go` split into cohesive per-concern files
+  (backend, handlers, discovery, remote, gateway, config, logging).
 
 ## [0.2.0]
 
@@ -72,7 +77,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   description truncation, remote (SSE / streamable-HTTP) backends, and health
   endpoint.
 
-[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jbcjorge/mcp-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jbcjorge/mcp-gateway/releases/tag/v0.1.0
