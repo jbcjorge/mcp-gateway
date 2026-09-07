@@ -17,24 +17,32 @@ import (
 	"time"
 )
 
-// newTestGateway creates a Gateway with the given backends for testing.
+// newTestGateway creates a Gateway with the given backends for testing. Each
+// backend becomes a single-member plain route of the same name.
 func newTestGateway(backends map[string]BackendDef) *Gateway {
+	perRoute := map[string][]string{}
 	gw := &Gateway{
 		config: Config{
 			Listen:      ":0",
 			IdleTimeout: 0,
 		},
 		backends:    make(map[string]*Backend),
-		authorizer:  NewBearerAuthorizer(nil, backends),
+		routes:      make(map[string]*Route),
 		lastRequest: time.Now(),
 	}
 	for name, def := range backends {
-		gw.backends[name] = &Backend{
+		b := &Backend{
 			name:    name,
 			def:     def,
 			pending: make(map[string]chan json.RawMessage),
 		}
+		gw.backends[name] = b
+		gw.routes[name] = newRoute(name, "", []*Backend{b})
+		if len(def.AuthTokens) > 0 {
+			perRoute[name] = def.AuthTokens
+		}
 	}
+	gw.authorizer = NewBearerAuthorizer(nil, perRoute)
 	return gw
 }
 
@@ -333,7 +341,7 @@ func TestLoadConfig(t *testing.T) {
 func TestLoadConfigWithBackendsFile(t *testing.T) {
 	dir := t.TempDir()
 	_ = writeTestFile(dir+"/config.json", `{"listen":":9999","backends_file":"backends.json"}`)
-	_ = writeTestFile(dir+"/backends.json", `{"mybackend":{"command":["echo","hi"]}}`)
+	_ = writeTestFile(dir+"/backends.json", `{"servers":{"mybackend":{"command":["echo","hi"]}},"backends":["mybackend"]}`)
 
 	cfg, err := loadConfig(dir + "/config.json")
 	if err != nil {
@@ -342,28 +350,34 @@ func TestLoadConfigWithBackendsFile(t *testing.T) {
 	if cfg.Listen != ":9999" {
 		t.Errorf("expected :9999, got %s", cfg.Listen)
 	}
-	if len(cfg.Backends) != 1 {
-		t.Fatalf("expected 1 backend, got %d", len(cfg.Backends))
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(cfg.Servers))
 	}
-	b, ok := cfg.Backends["mybackend"]
+	b, ok := cfg.Servers["mybackend"]
 	if !ok {
-		t.Fatal("expected mybackend in backends")
+		t.Fatal("expected mybackend in servers")
 	}
 	if len(b.Command) != 2 || b.Command[0] != "echo" {
 		t.Errorf("unexpected command: %v", b.Command)
+	}
+	if len(cfg.Routes) != 1 || cfg.Routes[0].Route != "mybackend" {
+		t.Errorf("expected route mybackend, got %+v", cfg.Routes)
 	}
 }
 
 func TestLoadConfigInlineBackends(t *testing.T) {
 	dir := t.TempDir()
-	_ = writeTestFile(dir+"/config.json", `{"backends":{"test":{"command":["cat"]}}}`)
+	_ = writeTestFile(dir+"/config.json", `{"servers":{"test":{"command":["cat"]}},"backends":["test"]}`)
 
 	cfg, err := loadConfig(dir + "/config.json")
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if _, ok := cfg.Backends["test"]; !ok {
-		t.Error("expected inline backend 'test'")
+	if _, ok := cfg.Servers["test"]; !ok {
+		t.Error("expected inline server 'test'")
+	}
+	if len(cfg.Routes) != 1 || cfg.Routes[0].Route != "test" {
+		t.Errorf("expected route 'test', got %+v", cfg.Routes)
 	}
 }
 
@@ -377,7 +391,7 @@ func TestLoadConfigMissingFile(t *testing.T) {
 func TestLoadConfigDefaults(t *testing.T) {
 	// Test that empty listen gets default
 	tmpFile := t.TempDir() + "/cfg.json"
-	_ = writeTestFile(tmpFile, `{"backends":{}}`)
+	_ = writeTestFile(tmpFile, `{"backends":[]}`)
 	cfg, err := loadConfig(tmpFile)
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
@@ -683,16 +697,6 @@ func TestPerBackendLogging(t *testing.T) {
 		"default": {Command: []string{"echo"}},
 	})
 
-	// Reinitialize with proper log settings
-	for name, def := range gw.config.Backends {
-		gw.backends[name] = &Backend{
-			name:        name,
-			def:         def,
-			pending:     make(map[string]chan json.RawMessage),
-			activeTools: make(map[string]bool),
-			logEnabled:  def.LogEnabled == nil || *def.LogEnabled,
-		}
-	}
 	// The test gateway helper doesn't set LogEnabled on defs, do it manually
 	gw.backends["verbose"].logEnabled = true
 	gw.backends["quiet"].logEnabled = false
@@ -766,7 +770,7 @@ func TestParseSSEResponse(t *testing.T) {
 func TestLoadConfigRemoteBackend(t *testing.T) {
 	dir := t.TempDir()
 	config := `{
-		"backends": {
+		"servers": {
 			"remote-sse": {
 				"url": "https://mcp.example.com/sse",
 				"headers": {"Authorization": "Bearer tok"},
@@ -777,7 +781,8 @@ func TestLoadConfigRemoteBackend(t *testing.T) {
 				"transport_type": "streamable-http",
 				"log_enabled": true
 			}
-		}
+		},
+		"backends": ["remote-sse", "remote-http"]
 	}`
 	_ = writeTestFile(dir+"/config.json", config)
 
@@ -786,9 +791,9 @@ func TestLoadConfigRemoteBackend(t *testing.T) {
 		t.Fatalf("loadConfig: %v", err)
 	}
 
-	sse, ok := cfg.Backends["remote-sse"]
+	sse, ok := cfg.Servers["remote-sse"]
 	if !ok {
-		t.Fatal("expected remote-sse backend")
+		t.Fatal("expected remote-sse server")
 	}
 	if sse.URL != "https://mcp.example.com/sse" {
 		t.Errorf("expected URL, got %s", sse.URL)
@@ -800,9 +805,9 @@ func TestLoadConfigRemoteBackend(t *testing.T) {
 		t.Error("expected log_enabled=false")
 	}
 
-	httpB, ok := cfg.Backends["remote-http"]
+	httpB, ok := cfg.Servers["remote-http"]
 	if !ok {
-		t.Fatal("expected remote-http backend")
+		t.Fatal("expected remote-http server")
 	}
 	if httpB.TransportType != "streamable-http" {
 		t.Errorf("expected streamable-http, got %s", httpB.TransportType)
@@ -835,7 +840,7 @@ func TestAuthGlobalTokenRequired_Rejects(t *testing.T) {
 	gw := newTestGateway(map[string]BackendDef{
 		"test": {Command: []string{"echo"}},
 	})
-	gw.authorizer = NewBearerAuthorizer([]string{"secret-token"}, map[string]BackendDef{})
+	gw.authorizer = NewBearerAuthorizer([]string{"secret-token"}, nil)
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
 	req := httptest.NewRequest(http.MethodPost, "/test/mcp", strings.NewReader(body))
@@ -852,7 +857,7 @@ func TestAuthGlobalTokenRequired_Accepts(t *testing.T) {
 	gw := newTestGateway(map[string]BackendDef{
 		"test": {Command: []string{"echo"}},
 	})
-	gw.authorizer = NewBearerAuthorizer([]string{"secret-token"}, map[string]BackendDef{})
+	gw.authorizer = NewBearerAuthorizer([]string{"secret-token"}, nil)
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
 	req := httptest.NewRequest(http.MethodPost, "/test/mcp", strings.NewReader(body))
@@ -871,7 +876,7 @@ func TestAuthPerBackendToken_OverridesGlobal(t *testing.T) {
 		"restricted": {Command: []string{"echo"}, AuthTokens: []string{"backend-secret"}},
 	}
 	gw := newTestGateway(backends)
-	gw.authorizer = NewBearerAuthorizer([]string{"global-secret"}, backends)
+	gw.authorizer = NewBearerAuthorizer([]string{"global-secret"}, map[string][]string{"restricted": {"backend-secret"}})
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
 
@@ -900,7 +905,7 @@ func TestAuthHealthEndpoint_NoAuthRequired(t *testing.T) {
 	gw := newTestGateway(map[string]BackendDef{
 		"test": {Command: []string{"echo"}},
 	})
-	gw.authorizer = NewBearerAuthorizer([]string{"secret"}, map[string]BackendDef{})
+	gw.authorizer = NewBearerAuthorizer([]string{"secret"}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -967,42 +972,52 @@ func TestToolAllowed_IncludeAndExclude(t *testing.T) {
 
 // --- Disabled Backend Tests ---
 
-func TestDisabledBackend_NotInGateway(t *testing.T) {
+func TestUnroutedServer_NotInGateway(t *testing.T) {
 	cfg := Config{
 		Listen: ":0",
-		Backends: map[string]BackendDef{
+		Servers: map[string]BackendDef{
 			"active":   {Command: []string{"echo"}},
-			"disabled": {Command: []string{"echo"}, Disabled: true},
+			"unrouted": {Command: []string{"echo"}},
 		},
+		Routes: []RouteEntry{{Route: "active"}},
 	}
-	gw := newGateway(cfg)
-
-	if _, ok := gw.backends["active"]; !ok {
-		t.Error("active backend should be in gateway")
+	gw, err := newGateway(cfg)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
 	}
-	if _, ok := gw.backends["disabled"]; ok {
-		t.Error("disabled backend should NOT be in gateway")
+	if _, ok := gw.routes["active"]; !ok {
+		t.Error("active route should be in gateway")
+	}
+	if _, ok := gw.routes["unrouted"]; ok {
+		t.Error("unrouted server should NOT be a route")
+	}
+	if _, ok := gw.backends["unrouted"]; ok {
+		t.Error("unrouted server should NOT be instantiated")
 	}
 }
 
-func TestDisabledBackend_Returns404(t *testing.T) {
+func TestUnroutedServer_Returns404(t *testing.T) {
 	cfg := Config{
 		Listen: ":0",
-		Backends: map[string]BackendDef{
+		Servers: map[string]BackendDef{
 			"active":   {Command: []string{"echo"}},
-			"disabled": {Command: []string{"echo"}, Disabled: true},
+			"unrouted": {Command: []string{"echo"}},
 		},
+		Routes: []RouteEntry{{Route: "active"}},
 	}
-	gw := newGateway(cfg)
+	gw, err := newGateway(cfg)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
-	req := httptest.NewRequest(http.MethodPost, "/disabled/mcp", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/unrouted/mcp", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	gw.handleRequest(w, req)
 
 	if w.Code != http.StatusNotFound {
-		t.Errorf("disabled backend should return 404, got %d", w.Code)
+		t.Errorf("unrouted server should return 404, got %d", w.Code)
 	}
 }
 
@@ -1960,30 +1975,37 @@ func TestShutdownAll(t *testing.T) {
 func TestNewGateway_DisabledBackends(t *testing.T) {
 	cfg := Config{
 		Listen: ":0",
-		Backends: map[string]BackendDef{
+		Servers: map[string]BackendDef{
 			"enabled1": {Command: []string{"echo"}},
 			"enabled2": {Command: []string{"echo"}},
-			"disabled": {Command: []string{"echo"}, Disabled: true},
+			"unrouted": {Command: []string{"echo"}},
 		},
+		Routes: []RouteEntry{{Route: "enabled1"}, {Route: "enabled2"}},
 	}
-	gw := newGateway(cfg)
-
+	gw, err := newGateway(cfg)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
 	if len(gw.backends) != 2 {
 		t.Errorf("expected 2 backends, got %d", len(gw.backends))
 	}
-	if _, ok := gw.backends["disabled"]; ok {
-		t.Error("disabled backend should not be in gateway")
+	if _, ok := gw.backends["unrouted"]; ok {
+		t.Error("unrouted server should not be instantiated")
 	}
 }
 
 func TestNewGateway_RemoteBackend(t *testing.T) {
 	cfg := Config{
 		Listen: ":0",
-		Backends: map[string]BackendDef{
+		Servers: map[string]BackendDef{
 			"remote": {URL: "https://example.com/mcp", TransportType: "streamable-http"},
 		},
+		Routes: []RouteEntry{{Route: "remote"}},
 	}
-	gw := newGateway(cfg)
+	gw, err := newGateway(cfg)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
 
 	b, ok := gw.backends["remote"]
 	if !ok {
@@ -2001,23 +2023,23 @@ func TestNewGateway_RemoteBackend(t *testing.T) {
 
 func TestBearerAuthorizer_IsEnabled(t *testing.T) {
 	// No tokens configured
-	a := NewBearerAuthorizer(nil, map[string]BackendDef{})
+	a := NewBearerAuthorizer(nil, nil)
 	if a.IsEnabled() {
 		t.Error("should not be enabled with no tokens")
 	}
 
 	// Global tokens
-	a = NewBearerAuthorizer([]string{"token1"}, map[string]BackendDef{})
+	a = NewBearerAuthorizer([]string{"token1"}, nil)
 	if !a.IsEnabled() {
 		t.Error("should be enabled with global tokens")
 	}
 
-	// Per-backend tokens only
-	a = NewBearerAuthorizer(nil, map[string]BackendDef{
-		"test": {AuthTokens: []string{"backend-token"}},
+	// Per-route tokens only
+	a = NewBearerAuthorizer(nil, map[string][]string{
+		"test": {"backend-token"},
 	})
 	if !a.IsEnabled() {
-		t.Error("should be enabled with per-backend tokens")
+		t.Error("should be enabled with per-route tokens")
 	}
 }
 
@@ -3209,7 +3231,7 @@ func TestSaveToolsCache_Success(t *testing.T) {
 
 func TestLoadConfig_CacheDir(t *testing.T) {
 	dir := t.TempDir()
-	cfgContent := `{"backends":{},"cache_dir":"my-cache"}`
+	cfgContent := `{"backends":[],"cache_dir":"my-cache"}`
 	cfgPath := filepath.Join(dir, "config.json")
 	os.WriteFile(cfgPath, []byte(cfgContent), 0644)
 
@@ -3227,7 +3249,7 @@ func TestLoadConfig_CacheDir(t *testing.T) {
 func TestLoadConfig_AbsCacheDir(t *testing.T) {
 	dir := t.TempDir()
 	absCache := filepath.Join(dir, "abs-cache")
-	cfgContent := fmt.Sprintf(`{"backends":{},"cache_dir":"%s"}`, absCache)
+	cfgContent := fmt.Sprintf(`{"backends":[],"cache_dir":"%s"}`, absCache)
 	cfgPath := filepath.Join(dir, "config.json")
 	os.WriteFile(cfgPath, []byte(cfgContent), 0644)
 
@@ -3248,11 +3270,15 @@ func TestNewGateway_GlobalDiscoveryPropagation(t *testing.T) {
 	cfg := Config{
 		Listen:    ":0",
 		Discovery: &force,
-		Backends: map[string]BackendDef{
+		Servers: map[string]BackendDef{
 			"test": {Command: []string{"echo"}},
 		},
+		Routes: []RouteEntry{{Route: "test"}},
 	}
-	gw := newGateway(cfg)
+	gw, err := newGateway(cfg)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
 
 	b := gw.backends["test"]
 	if b.def.Discovery == nil {

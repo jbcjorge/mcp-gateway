@@ -53,23 +53,27 @@ const (
 
 // Config is the top-level configuration.
 type Config struct {
-	Listen                  string                `json:"listen"`
-	LogLevel                string                `json:"log_level"`                          // debug, info, warn, error (default: info)
-	LogFile                 string                `json:"log_file"`                           // path to log file (default: stderr)
-	LogMaxSizeMB            int                   `json:"log_max_size_mb"`                    // max log file size in MB before rotation (default: 10)
-	LogMaxFiles             int                   `json:"log_max_files"`                      // number of rotated files to keep (default: 3)
-	CacheDir                string                `json:"cache_dir"`                          // directory for persistent tools cache (default: alongside config)
-	MaxDescLen              int                   `json:"max_description_length"`             // truncate tool descriptions to this length (0 = no truncation)
-	Discovery               *bool                 `json:"discovery"`                          // global discovery toggle: nil=auto, true=force, false=disable for all backends
-	Env                     map[string]string     `json:"env"`                                // global environment variables for all backends
-	CABundle                *CABundleConfig       `json:"ca_bundle"`                          // optional CA bundle management (see CABundleConfig)
-	AuthTokens              []string              `json:"auth_tokens"`                        // global bearer tokens (used when backend has no own tokens)
-	IdleTimeout             int                   `json:"idle_timeout_seconds"`               // kill backends idle for this long (0 = never)
-	SelfIdleTimeout         int                   `json:"self_idle_timeout_seconds"`          // kill gateway itself after this long with no requests (0 = never)
-	CredentialTTLSoftMargin int                   `json:"credential_ttl_soft_margin_seconds"` // recycle (defer-if-busy) this long before credential expiry (0 = default 300)
-	CredentialTTLHardGuard  int                   `json:"credential_ttl_hard_guard_seconds"`  // force-recycle this long before credential expiry (0 = default 120)
-	BackendsFile            string                `json:"backends_file"`                      // path to backends.json (relative to config dir)
-	Backends                map[string]BackendDef `json:"backends"`
+	Listen                  string            `json:"listen"`
+	LogLevel                string            `json:"log_level"`                          // debug, info, warn, error (default: info)
+	LogFile                 string            `json:"log_file"`                           // path to log file (default: stderr)
+	LogMaxSizeMB            int               `json:"log_max_size_mb"`                    // max log file size in MB before rotation (default: 10)
+	LogMaxFiles             int               `json:"log_max_files"`                      // number of rotated files to keep (default: 3)
+	CacheDir                string            `json:"cache_dir"`                          // directory for persistent tools cache (default: alongside config)
+	MaxDescLen              int               `json:"max_description_length"`             // truncate tool descriptions to this length (0 = no truncation)
+	Discovery               *bool             `json:"discovery"`                          // global discovery toggle: nil=auto, true=force, false=disable for all backends
+	Env                     map[string]string `json:"env"`                                // global environment variables for all backends
+	CABundle                *CABundleConfig   `json:"ca_bundle"`                          // optional CA bundle management (see CABundleConfig)
+	AuthTokens              []string          `json:"auth_tokens"`                        // global bearer tokens (used when backend has no own tokens)
+	IdleTimeout             int               `json:"idle_timeout_seconds"`               // kill backends idle for this long (0 = never)
+	SelfIdleTimeout         int               `json:"self_idle_timeout_seconds"`          // kill gateway itself after this long with no requests (0 = never)
+	CredentialTTLSoftMargin int               `json:"credential_ttl_soft_margin_seconds"` // recycle (defer-if-busy) this long before credential expiry (0 = default 300)
+	CredentialTTLHardGuard  int               `json:"credential_ttl_hard_guard_seconds"`  // force-recycle this long before credential expiry (0 = default 120)
+	BackendsFile            string            `json:"backends_file"`                      // path to backends.json (relative to config dir)
+	// Backend topology (new schema, pre-1.0): servers/compositions/backends.
+	// Loaded inline here or from BackendsFile.
+	Servers      map[string]BackendDef     `json:"servers"`
+	Compositions map[string]CompositionDef `json:"compositions"`
+	Routes       []RouteEntry              `json:"backends"`
 }
 
 // BackendDef defines a backend MCP subprocess or remote server.
@@ -144,7 +148,8 @@ type jsonRPCMessage struct {
 // Gateway holds all backends and routes requests.
 type Gateway struct {
 	config      Config
-	backends    map[string]*Backend
+	backends    map[string]*Backend // all member instances (keyed by instance name) for lifecycle
+	routes      map[string]*Route   // client-facing routes (keyed by route name)
 	authorizer  Authorizer
 	mu          sync.RWMutex
 	lastRequest time.Time // last time any request was received
@@ -194,7 +199,11 @@ func main() {
 		os.Exit(exitCABundleFailed)
 	}
 
-	gw := newGateway(cfg)
+	gw, gwErr := newGateway(cfg)
+	if gwErr != nil {
+		slog.Error("failed to build gateway from config", "error", gwErr)
+		os.Exit(exitFailure)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", gw.handleRequest)
@@ -360,45 +369,75 @@ func initLogging(cfg Config, configPath string) error {
 	return nil
 }
 
-// newGateway creates a Gateway with backends initialized from the config.
-func newGateway(cfg Config) *Gateway {
+// newGateway creates a Gateway with routes and member backends initialized from
+// the config. Returns an error if the backend topology fails to resolve
+// (dangling route/member references).
+func newGateway(cfg Config) (*Gateway, error) {
+	resolved, err := resolveRoutes(&CompositionConfig{
+		Servers:      cfg.Servers,
+		Compositions: cfg.Compositions,
+		Backends:     cfg.Routes,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	routeTokens := map[string][]string{}
 	gw := &Gateway{
-		config:     cfg,
-		backends:   make(map[string]*Backend),
-		authorizer: NewBearerAuthorizer(cfg.AuthTokens, cfg.Backends),
+		config:   cfg,
+		backends: make(map[string]*Backend),
+		routes:   make(map[string]*Route),
 	}
 
-	for name, def := range cfg.Backends {
-		if def.Disabled {
-			slog.Info("backend disabled, skipping", "backend", name)
-			continue
+	for _, rr := range resolved {
+		members := make([]*Backend, 0, len(rr.Members))
+		for _, m := range rr.Members {
+			instanceName := rr.Name
+			if len(rr.Members) > 1 {
+				instanceName = rr.Name + "/" + m.ServerName
+			}
+			b := gw.buildMemberBackend(cfg, instanceName, m)
+			gw.backends[instanceName] = b
+			members = append(members, b)
+			if len(m.Def.AuthTokens) > 0 {
+				routeTokens[rr.Name] = m.Def.AuthTokens
+			}
 		}
-		if def.Discovery == nil && cfg.Discovery != nil {
-			def.Discovery = cfg.Discovery
-		}
-		b := &Backend{
-			name:          name,
-			def:           def,
-			globalEnv:     cfg.Env,
-			cacheDir:      cfg.CacheDir,
-			maxDescLen:    cfg.MaxDescLen,
-			pending:       make(map[string]chan json.RawMessage),
-			activeTools:   make(map[string]bool),
-			logEnabled:    def.LogEnabled == nil || *def.LogEnabled,
-			ttlSoftMargin: time.Duration(cfg.CredentialTTLSoftMargin) * time.Second,
-			ttlHardGuard:  time.Duration(cfg.CredentialTTLHardGuard) * time.Second,
-		}
-		if def.URL != "" {
-			b.httpClient = &http.Client{Timeout: 120 * time.Second}
-			b.ssePending = make(map[string]chan json.RawMessage)
-		}
-		b.loadToolsCache()
-		b.buildCategories()
-		gw.backends[name] = b
+		gw.routes[rr.Name] = newRoute(rr.Name, rr.Prefix, members)
 	}
 
+	gw.authorizer = NewBearerAuthorizer(cfg.AuthTokens, routeTokens)
 	gw.lastRequest = time.Now()
-	return gw
+	return gw, nil
+}
+
+// buildMemberBackend constructs a *Backend instance for a resolved member.
+func (gw *Gateway) buildMemberBackend(cfg Config, instanceName string, m ResolvedMember) *Backend {
+	def := m.Def
+	def.IncludeTools = m.IncludeTools
+	def.ExcludeTools = m.ExcludeTools
+	if def.Discovery == nil && cfg.Discovery != nil {
+		def.Discovery = cfg.Discovery
+	}
+	b := &Backend{
+		name:          instanceName,
+		def:           def,
+		globalEnv:     cfg.Env,
+		cacheDir:      cfg.CacheDir,
+		maxDescLen:    cfg.MaxDescLen,
+		pending:       make(map[string]chan json.RawMessage),
+		activeTools:   make(map[string]bool),
+		logEnabled:    def.LogEnabled == nil || *def.LogEnabled,
+		ttlSoftMargin: time.Duration(cfg.CredentialTTLSoftMargin) * time.Second,
+		ttlHardGuard:  time.Duration(cfg.CredentialTTLHardGuard) * time.Second,
+	}
+	if def.URL != "" {
+		b.httpClient = &http.Client{Timeout: 120 * time.Second}
+		b.ssePending = make(map[string]chan json.RawMessage)
+	}
+	b.loadToolsCache()
+	b.buildCategories()
+	return b
 }
 
 // rotatingWriter is an io.Writer that rotates the underlying file when it exceeds maxSize.
@@ -525,7 +564,8 @@ func loadConfig(path string) (Config, error) {
 		cfg.CacheDir = filepath.Join(filepath.Dir(path), cfg.CacheDir)
 	}
 
-	// Load backends from separate file if specified
+	// Load backend topology from a separate file if specified. The file holds
+	// the new schema: {servers, compositions, backends}.
 	if cfg.BackendsFile != "" {
 		backendsPath := cfg.BackendsFile
 		if !filepath.IsAbs(backendsPath) {
@@ -535,13 +575,17 @@ func loadConfig(path string) (Config, error) {
 		if err != nil {
 			return cfg, ErrBackendsLoad.Parse(errors.WithParsedMessage(backendsPath), errors.WithError(err))
 		}
-		if err := json.Unmarshal(backendsData, &cfg.Backends); err != nil {
+		var topo CompositionConfig
+		if err := json.Unmarshal(backendsData, &topo); err != nil {
 			return cfg, ErrBackendsParse.Parse(errors.WithParsedMessage(backendsPath), errors.WithError(err))
 		}
+		cfg.Servers = topo.Servers
+		cfg.Compositions = topo.Compositions
+		cfg.Routes = topo.Backends
 	}
 
-	if cfg.Backends == nil {
-		cfg.Backends = make(map[string]BackendDef)
+	if cfg.Servers == nil {
+		cfg.Servers = make(map[string]BackendDef)
 	}
 	return cfg, nil
 }
@@ -691,14 +735,14 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	gw.mu.RLock()
-	backend, ok := gw.backends[path]
+	route, ok := gw.routes[path]
 	gw.mu.RUnlock()
 	if !ok {
 		http.Error(w, fmt.Sprintf("unknown backend: %s", path), http.StatusNotFound)
 		return
 	}
 
-	// Auth check
+	// Auth check (keyed by route name)
 	if authErr := gw.authorizer.Authorize(r, path); authErr != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		gw.writeResponse(w, r, jsonRPCError(nil, CodeAuthError, authErr))
@@ -727,21 +771,27 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle MCP lifecycle methods locally (no backend spawn needed)
-	if resp, handled := gw.handleLocally(envelope, body, backend); handled {
-		gw.writeResponse(w, r, resp)
-		return
-	}
-
-	// Forward to backend
-	resp, err := gw.forwardToBackend(r.Context(), backend, envelope, body)
+	resp, err := gw.dispatchRoute(r.Context(), route, envelope, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		gw.writeResponse(w, r, jsonRPCError(envelope.ID, CodeBackendError, err))
 		return
 	}
-
 	gw.writeResponse(w, r, resp)
+}
+
+// dispatchRoute handles a request for a route. Single-member routes with no
+// prefix take the exact legacy path (delegate to the one backend). Composite or
+// prefixed routes use route-level merged tools/list and ownership dispatch.
+func (gw *Gateway) dispatchRoute(ctx context.Context, route *Route, envelope jsonRPCMessage, body []byte) ([]byte, error) {
+	if !route.isComposite() && route.prefix == "" {
+		b := route.members[0]
+		if resp, handled := gw.handleLocally(envelope, body, b); handled {
+			return resp, nil
+		}
+		return gw.forwardToBackend(ctx, b, envelope, body)
+	}
+	return gw.dispatchComposite(ctx, route, envelope, body)
 }
 
 // handleRestart kills a backend so the next request re-spawns it fresh.
@@ -801,6 +851,97 @@ func (gw *Gateway) handleHealth(w http.ResponseWriter) {
 	}); err != nil {
 		slog.Error("health response write failed", "error", err)
 	}
+}
+
+// dispatchComposite handles a request for a composite or prefixed route.
+func (gw *Gateway) dispatchComposite(ctx context.Context, route *Route, envelope jsonRPCMessage, body []byte) ([]byte, error) {
+	switch envelope.Method {
+	case "initialize":
+		return localInitializeResponse(envelope.ID, route.name), nil
+	case "notifications/initialized":
+		return []byte{}, nil
+	case "ping":
+		data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": envelope.ID, "result": map[string]any{}})
+		return data, nil
+	case "tools/list":
+		return gw.compositeToolsList(ctx, route, envelope.ID)
+	case "tools/call":
+		return gw.compositeToolsCall(ctx, route, envelope, body)
+	default:
+		// Non-tool methods route to the primary member.
+		return gw.forwardToBackend(ctx, route.primary(), envelope, body)
+	}
+}
+
+// compositeToolsList fetches each member's tools/list (spawning as needed),
+// merges + prefixes, and returns the merged result wrapped in a JSON-RPC reply.
+func (gw *Gateway) compositeToolsList(ctx context.Context, route *Route, id *json.RawMessage) ([]byte, error) {
+	merged, err := route.toolsList(func(b *Backend) (json.RawMessage, error) {
+		if err := b.ensureRunning(); err != nil {
+			return nil, err
+		}
+		listReq := []byte(`{"jsonrpc":"2.0","id":"_gw_tools","method":"tools/list","params":{}}`)
+		resp, err := b.send(ctx, listReq)
+		if err != nil {
+			return nil, err
+		}
+		// Extract the "result" object from the member's JSON-RPC response.
+		var env struct {
+			Result json.RawMessage `json:"result"`
+		}
+		if uerr := json.Unmarshal(resp, &env); uerr != nil {
+			return nil, uerr
+		}
+		return env.Result, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	reply, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": json.RawMessage(merged)})
+	return reply, nil
+}
+
+// compositeToolsCall routes a tools/call to the owning member, stripping the
+// route prefix from the tool name before forwarding.
+func (gw *Gateway) compositeToolsCall(ctx context.Context, route *Route, envelope jsonRPCMessage, body []byte) ([]byte, error) {
+	name := callToolName(body)
+	member, realName, ok := route.ownerOfTool(name)
+	if !ok {
+		// Refresh the merged list once (cache may be cold), then retry.
+		if _, err := gw.compositeToolsList(ctx, route, nil); err == nil {
+			member, realName, ok = route.ownerOfTool(name)
+		}
+	}
+	if !ok {
+		return nil, ErrUnknownTool.Parse(errors.WithParsedMessage(name))
+	}
+	fwdBody := body
+	if realName != name {
+		rewritten, err := rewriteToolCallName(body, realName)
+		if err != nil {
+			return nil, err
+		}
+		fwdBody = rewritten
+	}
+	return gw.forwardToBackend(ctx, member, envelope, fwdBody)
+}
+
+// localInitializeResponse builds the standard initialize reply for a route.
+func localInitializeResponse(id *json.RawMessage, routeName string) []byte {
+	resp := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities": map[string]any{
+				"tools":     map[string]any{"listChanged": true},
+				"resources": map[string]any{"listChanged": true},
+			},
+			"serverInfo": map[string]any{"name": "mcp-gateway/" + routeName, "version": "1.0.0"},
+		},
+	}
+	data, _ := json.Marshal(resp)
+	return data
 }
 
 // forwardToBackend sends a request to the backend, retrying once on failure.

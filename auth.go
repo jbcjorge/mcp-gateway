@@ -30,12 +30,13 @@ type BearerAuthorizer struct {
 	backendTokens map[string][]string // backend name -> allowed tokens
 }
 
-// NewBearerAuthorizer creates a BearerAuthorizer from config.
-func NewBearerAuthorizer(globalTokens []string, backends map[string]BackendDef) *BearerAuthorizer {
+// NewBearerAuthorizer creates a BearerAuthorizer. perRouteTokens maps a route
+// name to its own allowed tokens (overriding the global set for that route).
+func NewBearerAuthorizer(globalTokens []string, perRouteTokens map[string][]string) *BearerAuthorizer {
 	bt := make(map[string][]string)
-	for name, def := range backends {
-		if len(def.AuthTokens) > 0 {
-			bt[name] = def.AuthTokens
+	for name, tokens := range perRouteTokens {
+		if len(tokens) > 0 {
+			bt[name] = tokens
 		}
 	}
 	return &BearerAuthorizer{
