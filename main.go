@@ -84,7 +84,6 @@ type BackendDef struct {
 	Categories   map[string][]string `json:"categories"`    // manual category overrides: {"read": ["tool_a", "tool_b"]}
 	IncludeTools []string            `json:"include_tools"` // glob patterns for tools to expose (empty = all)
 	ExcludeTools []string            `json:"exclude_tools"` // glob patterns for tools to block (applied after include)
-	Disabled     bool                `json:"disabled"`      // skip this backend entirely
 
 	// Remote backend fields (mutually exclusive with Command)
 	URL           string            `json:"url"`            // remote MCP server URL (SSE or streamable HTTP)
