@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean test test-report fmt vet shadow lint vuln gosec gitleaks cyclomatic cognitive check tools release warm version tag
+.PHONY: all build install uninstall clean test test-report fmt vet shadow lint vuln gosec gitleaks cyclomatic cognitive check tools update-deps release warm version tag
 
 BINARY     := mcp-gateway
 PREFIX     ?= $(HOME)/.local/bin
@@ -34,6 +34,14 @@ tools:
 	go install github.com/securego/gosec/v2/cmd/gosec@latest
 	go install gotest.tools/gotestsum@latest
 	go install github.com/boumenot/gocover-cobertura@latest
+
+## update-deps: Update direct dependencies to latest, tidy, and verify
+update-deps:
+	go list -m -f '{{if not .Indirect}}{{.Path}}{{end}}' all | tail -n +2 | xargs -I{} go get {}@latest
+	go get go@latest
+	go mod tidy
+	go build ./...
+	go test -count=1 ./...
 
 ## build: Compile binary
 build:
