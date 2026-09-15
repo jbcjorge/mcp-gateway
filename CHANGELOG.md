@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0]
+
+### Added
+
+- **Graceful process-group teardown on backend stop.** Each stdio backend is
+  placed in its own process group, so stopping it signals the whole tree at
+  once: SIGTERM to the group, wait a grace window, then escalate to group
+  SIGKILL. This guarantees processes a backend spawns (e.g. a browser and its
+  renderer children) are reaped with the backend instead of being orphaned when
+  the backend is wedged. Recycling, idle reaping, and manual restart all route
+  through the graceful path. Windows uses a best-effort single-process fallback
+  since it lacks POSIX process groups.
+- **`stop_grace_seconds` config.** Sets the SIGTERM-to-SIGKILL grace, at the
+  global level and per server (`servers.<name>.stop_grace_seconds`), resolving
+  per-server first, then global, then a 20s default. A configured `0` falls
+  through to the next level rather than meaning an immediate SIGKILL. Useful for
+  servers that own heavy child processes needing longer to tear down. See README.
+
+### Changed
+
+- Internal: added an `update-deps` Make target (update direct dependencies to
+  latest, tidy, then verify with build and tests) and bumped the `go` directive
+  to 1.27.1.
+
 ## [0.3.0]
 
 ### Added
@@ -77,7 +101,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   description truncation, remote (SSE / streamable-HTTP) backends, and health
   endpoint.
 
-[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jbcjorge/mcp-gateway/compare/v0.1.0...v0.1.1
