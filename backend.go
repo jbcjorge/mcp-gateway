@@ -25,6 +25,11 @@ func (b *Backend) spawnProcess() error {
 
 	cmd := exec.CommandContext(ctx, b.def.Command[0], b.def.Command[1:]...) // #nosec G204 -- command from admin config, subprocess management is this tool's purpose
 
+	// Place the child in its own process group so the whole tree (the backend
+	// and any processes it spawns, e.g. a browser) can be signalled atomically
+	// on stop. See stopProcessGroup.
+	configureProcAttr(cmd)
+
 	cmd.Env = os.Environ()
 	for k, v := range b.globalEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -64,6 +69,7 @@ func (b *Backend) spawnProcess() error {
 	b.stdout = bufio.NewReaderSize(stdout, 1024*1024)
 	b.pending = make(map[string]chan json.RawMessage)
 	b.running = true
+	b.exited = make(chan struct{})
 
 	pid := cmd.Process.Pid
 	slog.Info("backend started", "backend", b.name, "pid", pid)
@@ -199,13 +205,43 @@ func (b *Backend) ttlOwnsProcess(pid int) bool {
 	return b.running && b.cmd != nil && b.cmd.Process != nil && b.cmd.Process.Pid == pid
 }
 
-// recycleLocked cancels the subprocess context so it terminates. The next request
-// re-spawns it with a fresh credential. Must be called with b.mu held.
-func (b *Backend) recycleLocked() {
-	if b.cancelFn != nil {
-		b.cancelFn()
-	}
+// gracefulStopLocked initiates a graceful teardown of the backend's process
+// group: SIGTERM to the group, escalate to SIGKILL after the stop grace window.
+// The escalation runs in a background goroutine so callers holding b.mu are not
+// blocked for the duration of the grace period. The subprocess context is
+// cancelled afterwards to release its resources; because b.cmd.Cancel is not
+// overridden, that cancel is a no-op signal-wise once the process has already
+// been signalled here (Go only kills a still-running process on ctx cancel).
+// Must be called with b.mu held.
+func (b *Backend) gracefulStopLocked() {
+	cmd := b.cmd
+	exited := b.exited
+	grace := b.stopGrace
+	name := b.name
+	cancel := b.cancelFn
 	b.running = false
+
+	if cmd != nil && cmd.Process != nil {
+		go func() {
+			stopProcessGroup(cmd, grace, exited, name)
+			// Release the command context once teardown is complete.
+			if cancel != nil {
+				cancel()
+			}
+		}()
+		return
+	}
+	// No live process; just release the context.
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// recycleLocked stops the subprocess (graceful group teardown) so it terminates.
+// The next request re-spawns it with a fresh credential. Must be called with
+// b.mu held.
+func (b *Backend) recycleLocked() {
+	b.gracefulStopLocked()
 }
 
 // waitForExit waits for the subprocess to exit and cleans up pending requests.
@@ -213,6 +249,12 @@ func (b *Backend) waitForExit(cmd *exec.Cmd) {
 	waitErr := cmd.Wait()
 	b.mu.Lock()
 	b.running = false
+	// Signal any in-progress graceful stop that the process has exited, so it
+	// can skip the SIGKILL escalation.
+	if b.exited != nil {
+		close(b.exited)
+		b.exited = nil
+	}
 	for id, ch := range b.pending {
 		close(ch)
 		delete(b.pending, id)
@@ -402,7 +444,8 @@ func (b *Backend) dispatchResponse(line []byte) {
 	}
 }
 
-// kill terminates the backend subprocess or disconnects from remote.
+// kill terminates the backend subprocess (graceful group teardown) or
+// disconnects from remote.
 func (b *Backend) kill() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -412,10 +455,7 @@ func (b *Backend) kill() {
 		return
 	}
 
-	if b.cancelFn != nil {
-		b.cancelFn()
-	}
-	b.running = false
+	b.gracefulStopLocked()
 }
 
 // isRunning returns whether the backend subprocess is alive.

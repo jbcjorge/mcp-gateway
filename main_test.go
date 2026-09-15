@@ -60,6 +60,14 @@ func TestSubprocessHelper(t *testing.T) {
 	if os.Getenv("TEST_SUBPROCESS") != "1" {
 		t.Skip("helper process")
 	}
+	// Stubborn mode: ignore SIGTERM and spawn a long-lived grandchild that
+	// writes its pid to TEST_GRANDCHILD_PIDFILE. Used to exercise the
+	// group-SIGKILL escalation and prove descendants are reaped with the group.
+	// Implemented per-platform (see procgroup_*_test.go).
+	if os.Getenv("TEST_STUBBORN") == "1" {
+		runStubbornHelper()
+		return
+	}
 	// Optionally emit the credential-expiry sentinel to stderr at startup so
 	// the gateway's TTL watcher can be exercised. Value is a unix epoch.
 	if exp := os.Getenv("TEST_CRED_EXPIRY"); exp != "" {

@@ -81,6 +81,7 @@ go install github.com/jbcjorge/mcp-gateway@latest
 | `listen` | `string` | Address to listen on |
 | `idle_timeout_seconds` | `int` | Kill backends idle for this long (0 = never) |
 | `self_idle_timeout_seconds` | `int` | Exit the gateway after no requests for this long (0 = never) |
+| `stop_grace_seconds` | `int` | Global default grace between SIGTERM and SIGKILL when stopping a backend's process group (0 = default 20s). Overridable per server. |
 | `auth_tokens` | `[]string` | Global bearer tokens |
 | `backends_file` | `string` | Path to backends.json (relative to config dir) |
 | `env` | `map` | Global environment variables applied to every backend |
@@ -180,6 +181,7 @@ A composition merges the tool lists of its ordered members under one route.
 | `discovery` | `bool` | Force enable/disable tool discovery |
 | `categories` | `map` | Manual tool category assignments |
 | `log_enabled` | `bool` | Per-backend logging toggle |
+| `stop_grace_seconds` | `int` | Grace between SIGTERM and SIGKILL when stopping this backend's process group (overrides global `stop_grace_seconds`). Useful for servers that own heavy child processes (e.g. a browser) needing longer to tear down. |
 
 ## CA bundle injection
 

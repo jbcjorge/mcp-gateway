@@ -61,6 +61,7 @@ type Config struct {
 	AuthTokens              []string          `json:"auth_tokens"`                        // global bearer tokens (used when backend has no own tokens)
 	IdleTimeout             int               `json:"idle_timeout_seconds"`               // kill backends idle for this long (0 = never)
 	SelfIdleTimeout         int               `json:"self_idle_timeout_seconds"`          // kill gateway itself after this long with no requests (0 = never)
+	StopGraceSeconds        int               `json:"stop_grace_seconds"`                 // global default grace between SIGTERM and SIGKILL on backend stop (0 = default 20s)
 	CredentialTTLSoftMargin int               `json:"credential_ttl_soft_margin_seconds"` // recycle (defer-if-busy) this long before credential expiry (0 = default 300)
 	CredentialTTLHardGuard  int               `json:"credential_ttl_hard_guard_seconds"`  // force-recycle this long before credential expiry (0 = default 120)
 	BackendsFile            string            `json:"backends_file"`                      // path to backends.json (relative to config dir)
@@ -88,6 +89,12 @@ type BackendDef struct {
 	// Per-backend options
 	AuthTokens []string `json:"auth_tokens"` // bearer tokens for this backend (overrides global)
 	LogEnabled *bool    `json:"log_enabled"` // nil=inherit global, true=verbose, false=quiet
+
+	// StopGraceSeconds overrides the global stop_grace_seconds for this backend:
+	// the delay between the SIGTERM sent to the backend's process group on stop
+	// and the escalation to SIGKILL. Servers that own heavy child processes
+	// (e.g. a browser) may need longer to tear down cleanly. nil = inherit global.
+	StopGraceSeconds *int `json:"stop_grace_seconds"`
 }
 
 // Backend manages a single stdio MCP subprocess or remote connection.
@@ -104,6 +111,8 @@ type Backend struct {
 	pending       map[string]chan json.RawMessage // id string -> response channel
 	running       bool
 	cancelFn      context.CancelFunc
+	stopGrace     time.Duration   // grace between SIGTERM and SIGKILL when stopping this backend's process group
+	exited        chan struct{}   // closed by waitForExit when the process exits; enables graceful-stop detection
 	lastUsed      time.Time       // last time a request was forwarded
 	toolsCache    json.RawMessage // cached tools/list response (nil = no cache)
 	toolsCachePid int             // pid of the backend that produced the cache

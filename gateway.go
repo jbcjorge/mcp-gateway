@@ -50,6 +50,20 @@ func newGateway(cfg Config) (*Gateway, error) {
 	return gw, nil
 }
 
+// resolveStopGrace determines the SIGTERM-to-SIGKILL grace for a backend:
+// the per-server override wins, then the global config value, then the built-in
+// default. A configured value of 0 at either level means "use the next level
+// down" rather than "no grace", to avoid an accidental immediate SIGKILL.
+func resolveStopGrace(perServer *int, global int) time.Duration {
+	if perServer != nil && *perServer > 0 {
+		return time.Duration(*perServer) * time.Second
+	}
+	if global > 0 {
+		return time.Duration(global) * time.Second
+	}
+	return defaultStopGrace
+}
+
 // buildMemberBackend constructs a *Backend instance for a resolved member.
 func (gw *Gateway) buildMemberBackend(cfg Config, instanceName string, m ResolvedMember) *Backend {
 	def := m.Def
@@ -69,6 +83,7 @@ func (gw *Gateway) buildMemberBackend(cfg Config, instanceName string, m Resolve
 		logEnabled:    def.LogEnabled == nil || *def.LogEnabled,
 		ttlSoftMargin: time.Duration(cfg.CredentialTTLSoftMargin) * time.Second,
 		ttlHardGuard:  time.Duration(cfg.CredentialTTLHardGuard) * time.Second,
+		stopGrace:     resolveStopGrace(def.StopGraceSeconds, cfg.StopGraceSeconds),
 	}
 	if def.URL != "" {
 		b.httpClient = &http.Client{Timeout: 120 * time.Second}
@@ -152,10 +167,7 @@ func (gw *Gateway) reapIdleBackends(timeout time.Duration) {
 		backend.mu.Lock()
 		if backend.running && !backend.lastUsed.IsZero() && now.Sub(backend.lastUsed) > timeout {
 			slog.Info("backend idle, killing", "backend", backend.name, "idle", now.Sub(backend.lastUsed).Round(time.Second))
-			if backend.cancelFn != nil {
-				backend.cancelFn()
-			}
-			backend.running = false
+			backend.gracefulStopLocked()
 		}
 		backend.mu.Unlock()
 	}
