@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0]
+
 ### Added
 
 - **Keyed backends.** A server with a non-empty `params` list becomes one route
@@ -32,6 +34,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   float ahead, which previously let a local `make check` pass while CI failed.
 - Bumped the Go directive to 1.27.2 to pick up net/http standard-library
   security fixes (GO-2026-6617, GO-2026-6613) flagged by `govulncheck` in CI.
+- CI action bumps: `docker/setup-qemu-action` 4.3.0 -> 4.4.0,
+  `docker/setup-buildx-action` 4.3.0 -> 4.4.1,
+  `SonarSource/sonarqube-scan-action` 8.2.1 -> 8.2.2,
+  `codecov/codecov-action` 7.0.0 -> 7.1.1, and the CodeQL action group.
 
 ## [0.4.0]
 
@@ -128,7 +134,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   description truncation, remote (SSE / streamable-HTTP) backends, and health
   endpoint.
 
-[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.1.1...v0.2.0
