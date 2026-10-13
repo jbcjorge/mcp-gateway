@@ -35,13 +35,25 @@ tools:
 	go install gotest.tools/gotestsum@latest
 	go install github.com/boumenot/gocover-cobertura@latest
 
-## update-deps: Update direct dependencies to latest, tidy, and verify
+## update-deps: Update direct dependencies + Go to latest, then pin that exact
+## Go version everywhere so local tooling (mise/asdf via .tool-versions) and CI
+## (go-version-file: go.mod) never float to a different version than go.mod.
+## The go directive in go.mod is the single source of truth: Go treats a
+## toolchain line equal to it as redundant (go mod tidy strips it), so the pin
+## lives in the go directive, mirrored into .tool-versions.
 update-deps:
 	go list -m -f '{{if not .Indirect}}{{.Path}}{{end}}' all | tail -n +2 | xargs -I{} go get {}@latest
 	go get go@latest
 	go mod tidy
+	@GOVER=$$(go mod edit -json | python3 -c 'import sys,json;print(json.load(sys.stdin)["Go"])'); \
+	echo "go $$GOVER" > .tool-versions; \
+	echo "pinned Go $$GOVER in go.mod and .tool-versions"
 	go build ./...
 	go test -count=1 ./...
+	@GOVER=$$(go mod edit -json | python3 -c 'import sys,json;print(json.load(sys.stdin)["Go"])'); \
+	TV=$$(awk '/^go /{print $$2}' .tool-versions); \
+	test "$$GOVER" = "$$TV" || { echo "PIN MISMATCH: go.mod=$$GOVER .tool-versions=$$TV" >&2; exit 1; }; \
+	echo "pin check OK: go.mod == .tool-versions == $$GOVER"
 
 ## build: Compile binary
 build:

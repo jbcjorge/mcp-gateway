@@ -1,6 +1,6 @@
 module github.com/jbcjorge/mcp-gateway
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/bored-engineer/go-launchd v0.0.0-20241220214420-b514778f4f80

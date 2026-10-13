@@ -23,6 +23,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `{ name, description?, validate?, envName?, required? }`. See README
   "Keyed backends" and `docs/design/keyed-backends.md`.
 
+### Changed
+
+- **`make update-deps` now pins the Go version everywhere.** After bumping Go to
+  latest it mirrors the exact version from the `go.mod` `go` directive into
+  `.tool-versions` and asserts they match, so local tooling (mise/asdf) and CI
+  (which reads `go-version-file: go.mod`) stay on the same version and never
+  float ahead, which previously let a local `make check` pass while CI failed.
+- Bumped the Go directive to 1.27.2 to pick up net/http standard-library
+  security fixes (GO-2026-6617, GO-2026-6613) flagged by `govulncheck` in CI.
+
 ## [0.4.0]
 
 ### Added
