@@ -90,11 +90,58 @@ type BackendDef struct {
 	AuthTokens []string `json:"auth_tokens"` // bearer tokens for this backend (overrides global)
 	LogEnabled *bool    `json:"log_enabled"` // nil=inherit global, true=verbose, false=quiet
 
+	// IdleTimeoutSeconds overrides the global idle_timeout_seconds for this
+	// backend. nil = inherit global, 0 = never reap (stays alive until the
+	// gateway exits), >0 = kill after this many seconds of inactivity. Useful
+	// for long-lived backends like a browser (Chrome CDP) that should not be
+	// reaped on the global cadence.
+	IdleTimeoutSeconds *int `json:"idle_timeout_seconds"`
+
 	// StopGraceSeconds overrides the global stop_grace_seconds for this backend:
 	// the delay between the SIGTERM sent to the backend's process group on stop
 	// and the escalation to SIGKILL. Servers that own heavy child processes
 	// (e.g. a browser) may need longer to tear down cleanly. nil = inherit global.
 	StopGraceSeconds *int `json:"stop_grace_seconds"`
+
+	// Params, when non-empty, marks this server as a KEYED backend: a family of
+	// identical child processes that differ only by routing coordinate(s) the
+	// client supplies per tool call. The gateway injects each param into every
+	// tool's input schema (tools/list), reads+strips them on tools/call, hashes
+	// their values to a stable instance id, lazily spawns/reuses one child per
+	// id (registered in gw.backends as "<route>/<id>" so the existing reaper,
+	// credential-TTL, health, and shutdown apply per child), and passes each
+	// value to the child as an environment variable. All upstream specifics
+	// (URL, token, extra vars, sanitization) are the child launcher's concern;
+	// the gateway only transports the key. Empty/absent = ordinary backend.
+	// See docs/design/keyed-backends.md.
+	Params []Param `json:"params"`
+}
+
+// Param is one routing parameter of a keyed backend. The gateway injects it into
+// every tool's input schema, reads and strips it on tools/call, includes its
+// value in the child's identity hash, and passes the value to the child as an
+// environment variable.
+type Param struct {
+	Name        string `json:"name"`        // injected tool-arg name, e.g. "sonarUrl" (required)
+	Description string `json:"description"` // help text shown to the agent
+	Validate    string `json:"validate"`    // optional regex; empty = accept any value
+	EnvName     string `json:"envName"`     // optional child env var name; empty = use Name
+	Required    *bool  `json:"required"`    // optional; nil = treated as required
+}
+
+// isKeyed reports whether this backend definition declares routing params.
+func (d BackendDef) isKeyed() bool { return len(d.Params) > 0 }
+
+// paramRequired reports whether a param is required (nil Required defaults true).
+func (p Param) paramRequired() bool { return p.Required == nil || *p.Required }
+
+// childEnvName returns the environment variable name used to pass this param's
+// value to a child process: EnvName when set, otherwise Name.
+func (p Param) childEnvName() string {
+	if p.EnvName != "" {
+		return p.EnvName
+	}
+	return p.Name
 }
 
 // Backend manages a single stdio MCP subprocess or remote connection.
@@ -103,6 +150,7 @@ type Backend struct {
 	def       BackendDef
 	globalEnv map[string]string
 	cacheDir  string // directory for persistent cache files
+	cacheName string // tool-cache file basename override (empty = use name); keyed children share the route's cache
 
 	mu            sync.Mutex
 	cmd           *exec.Cmd
@@ -112,6 +160,7 @@ type Backend struct {
 	running       bool
 	cancelFn      context.CancelFunc
 	stopGrace     time.Duration   // grace between SIGTERM and SIGKILL when stopping this backend's process group
+	idleTimeout   time.Duration   // per-backend idle timeout (resolved): 0 = inherit global, neverReapIdle = never reap, >0 = reap after this duration
 	exited        chan struct{}   // closed by waitForExit when the process exits; enables graceful-stop detection
 	lastUsed      time.Time       // last time a request was forwarded
 	toolsCache    json.RawMessage // cached tools/list response (nil = no cache)
@@ -239,10 +288,12 @@ func main() {
 		gw.shutdownAll()
 	}()
 
-	// Start backend idle reaper
-	if cfg.IdleTimeout > 0 {
+	// Start backend idle reaper. Runs when a global timeout is set, or when any
+	// backend defines a per-backend idle timeout (so a backend can be reaped
+	// even if the global is 0 = never).
+	if cfg.IdleTimeout > 0 || gw.minBackendIdleTimeout() > 0 {
 		go gw.idleReaper(ctx, time.Duration(cfg.IdleTimeout)*time.Second)
-		slog.Info("backend idle reaper enabled", "timeout_seconds", cfg.IdleTimeout)
+		slog.Info("backend idle reaper enabled", "global_timeout_seconds", cfg.IdleTimeout)
 	}
 
 	// Start self-idle timer (gateway exits after no requests)

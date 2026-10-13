@@ -96,6 +96,9 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 // prefix take the exact legacy path (delegate to the one backend). Composite or
 // prefixed routes use route-level merged tools/list and ownership dispatch.
 func (gw *Gateway) dispatchRoute(ctx context.Context, route *Route, envelope jsonRPCMessage, body []byte) ([]byte, error) {
+	if route.isKeyed() {
+		return gw.dispatchKeyed(ctx, route, envelope, body)
+	}
 	if !route.isComposite() && route.prefix == "" {
 		b := route.members[0]
 		if resp, handled := gw.handleLocally(envelope, body, b); handled {

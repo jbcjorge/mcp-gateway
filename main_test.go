@@ -118,6 +118,15 @@ func subprocessHandleLine(line string, respDelay time.Duration) (string, bool) {
 	if respDelay > 0 {
 		time.Sleep(respDelay)
 	}
+	// For keyed-routing tests: if TEST_ECHO_ENV names an environment variable,
+	// echo its value in the result so the caller can assert which instance (which
+	// spawned child, carrying its own env) served the call. Unset in all other
+	// tests, so default behavior is unchanged.
+	if envName := os.Getenv("TEST_ECHO_ENV"); envName != "" {
+		val := os.Getenv(envName)
+		valJSON, _ := json.Marshal(val)
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"instance":%s}}`, string(*msg.ID), string(valJSON)), true
+	}
 	return fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{}}`, string(*msg.ID)), true
 }
 

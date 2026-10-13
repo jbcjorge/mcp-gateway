@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Keyed backends.** A server with a non-empty `params` list becomes one route
+  that spawns and pools a distinct child process per runtime key supplied as a
+  per-call tool argument. The gateway injects each param into every tool's input
+  schema on `tools/list`, and on `tools/call` validates the params, derives a
+  stable instance id (`sha256` of the values, 12 hex chars), selects or lazily
+  spawns the child for that id, strips the params, and forwards the rest. Each
+  child registers as `<route>/<id>` and is lifecycle-managed independently (idle
+  reap, credential TTL, restart, health), de-registering on exit. The tool
+  surface is shared across instances; cold `tools/list` returns empty until the
+  first call warms the cache. All instance specifics (URL, token, env,
+  sanitization) are the child's concern; the gateway only transports the key, so
+  adding a new instance needs no config change. Params:
+  `{ name, description?, validate?, envName?, required? }`. See README
+  "Keyed backends" and `docs/design/keyed-backends.md`.
+
 ## [0.4.0]
 
 ### Added

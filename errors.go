@@ -76,6 +76,16 @@ var (
 	ErrNoToolsCache    = errors.New("no tools cache")
 )
 
+// Keyed backend errors
+var (
+	ErrKeyedParamMissing   = errors.New("missing required parameter: %s")
+	ErrKeyedParamNotString = errors.New("parameter must be a string: %s")
+	ErrKeyedParamInvalid   = errors.New("parameter failed validation: %s")
+	ErrKeyedParamBadRegex  = errors.New("invalid validation regex for parameter: %s")
+	ErrKeyedStripParse     = errors.New("failed to parse tools/call for keyed routing")
+	ErrKeyedChildFailed    = errors.New("failed to start keyed child instance")
+)
+
 // JSON-RPC error codes (MCP standard)
 const (
 	CodeParseError     = -32700

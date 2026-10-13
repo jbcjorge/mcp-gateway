@@ -11,6 +11,12 @@ import (
 // backends. A single-server route has one member; a composition has several.
 // The gateway resolves requests to a Route; members remain plain *Backend with
 // independent lifecycle.
+//
+// A KEYED route is a special single-server case: it has no eager member.
+// Instead it spawns one child *Backend per instance id (derived from per-call
+// params) on demand, pooling and reusing them. Children are registered in
+// gw.backends under "<route>/<id>" so the existing reaper/TTL/health/shutdown
+// treat each child independently. See docs/design/keyed-backends.md.
 type Route struct {
 	name    string
 	prefix  string
@@ -19,11 +25,107 @@ type Route struct {
 	mu          sync.Mutex
 	toolOwners  map[string]itemOwner // display tool name -> (member name, real name)
 	mergedTools json.RawMessage      // cached merged+prefixed tools/list result object
+
+	// Keyed-route state (nil/empty for normal and composite routes).
+	keyed      []Param             // declared routing params; non-empty => keyed route
+	keyedDef   BackendDef          // server template used to build each child
+	children   map[string]*Backend // instance id -> child backend
+	spawning   map[string]chan struct{}
+	buildChild func(id string, env map[string]string) *Backend // build (not start) a child
+	register   func(name string, b *Backend)                   // register child in gw.backends
+	unregister func(name string)                               // remove child from gw.backends
 }
 
 // newRoute builds a Route from ordered member backends.
 func newRoute(name, prefix string, members []*Backend) *Route {
 	return &Route{name: name, prefix: prefix, members: members}
+}
+
+// newKeyedRoute builds a keyed Route with no eager members. The gateway injects
+// buildChild (constructs but does not start a child bound to the instance env),
+// register/unregister (add/remove the child in gw.backends so lifecycle applies).
+func newKeyedRoute(
+	name string,
+	def BackendDef,
+	buildChild func(id string, env map[string]string) *Backend,
+	register func(name string, b *Backend),
+	unregister func(name string),
+) *Route {
+	return &Route{
+		name:       name,
+		keyed:      def.Params,
+		keyedDef:   def,
+		children:   make(map[string]*Backend),
+		spawning:   make(map[string]chan struct{}),
+		buildChild: buildChild,
+		register:   register,
+		unregister: unregister,
+	}
+}
+
+// isKeyed reports whether this route spawns children per instance id.
+func (rt *Route) isKeyed() bool { return len(rt.keyed) > 0 }
+
+// resolveChild returns the child backend for the given instance id, building and
+// registering it on first use. env holds the param values to inject into the
+// child's environment (keyed by each param's child env name). A per-id spawn
+// guard ensures concurrent calls for a new id build exactly one child.
+func (rt *Route) resolveChild(id string, env map[string]string) *Backend {
+	for {
+		rt.mu.Lock()
+		if b, ok := rt.children[id]; ok {
+			rt.mu.Unlock()
+			return b
+		}
+		if ch, inFlight := rt.spawning[id]; inFlight {
+			// Another goroutine is building this id; wait and retry.
+			rt.mu.Unlock()
+			<-ch
+			continue
+		}
+		// Claim the build.
+		done := make(chan struct{})
+		rt.spawning[id] = done
+		rt.mu.Unlock()
+
+		b := rt.buildChild(id, env)
+		name := childInstanceName(rt.name, id)
+		if rt.register != nil {
+			rt.register(name, b)
+		}
+
+		rt.mu.Lock()
+		rt.children[id] = b
+		delete(rt.spawning, id)
+		close(done)
+		rt.mu.Unlock()
+		return b
+	}
+}
+
+// dropChild removes a child from the pool and from gw.backends. Called when a
+// keyed child process exits (reap, crash, TTL recycle) so a later call spawns a
+// fresh one. id is derived from the composite name "<route>/<id>".
+func (rt *Route) dropChild(id string) {
+	rt.mu.Lock()
+	_, ok := rt.children[id]
+	delete(rt.children, id)
+	rt.mu.Unlock()
+	if ok && rt.unregister != nil {
+		rt.unregister(childInstanceName(rt.name, id))
+	}
+}
+
+// keyedMembers returns a snapshot of the current child backends (for health and
+// shutdown iteration if needed).
+func (rt *Route) keyedMembers() []*Backend {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]*Backend, 0, len(rt.children))
+	for _, b := range rt.children {
+		out = append(out, b)
+	}
+	return out
 }
 
 // backendByName returns the member backend with the given name.

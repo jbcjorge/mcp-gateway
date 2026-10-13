@@ -327,12 +327,23 @@ func (b *Backend) toolAllowed(name string) bool {
 	return true
 }
 
+// toolsCacheBasename returns the basename used for this backend's tools cache
+// file. Keyed children set cacheName to the route name so all instances of a
+// keyed route share one cache file (identical tool surface); everything else
+// uses the backend name.
+func (b *Backend) toolsCacheBasename() string {
+	if b.cacheName != "" {
+		return b.cacheName
+	}
+	return b.name
+}
+
 // loadToolsCache reads the cached tools/list response from disk.
 func (b *Backend) loadToolsCache() {
 	if b.cacheDir == "" {
 		return
 	}
-	path := filepath.Join(b.cacheDir, b.name+".json")
+	path := filepath.Join(b.cacheDir, b.toolsCacheBasename()+".json")
 	data, err := os.ReadFile(path) // #nosec G304 -- path from cacheDir config + backend name, not user request input
 	if err != nil {
 		return // no cache file, that's fine
@@ -350,7 +361,7 @@ func (b *Backend) saveToolsCache() {
 		slog.Warn("failed to create cache directory", "backend", b.name, "error", err)
 		return
 	}
-	path := filepath.Join(b.cacheDir, b.name+".json")
+	path := filepath.Join(b.cacheDir, b.toolsCacheBasename()+".json")
 	if err := os.WriteFile(path, b.toolsCache, 0600); err != nil {
 		slog.Warn("failed to write tools cache", "backend", b.name, "error", err)
 	} else {

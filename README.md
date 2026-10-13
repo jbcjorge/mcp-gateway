@@ -16,6 +16,7 @@ A zero-ops MCP server manager. Spawns, routes, and recycles MCP backends on dema
 - **Bearer auth** - global and per-backend token authentication
 - **Tool filtering** - include/exclude glob patterns per backend
 - **Composite backends** - combine multiple servers under one route with last-wins tool override, plus optional per-route tool prefixing to avoid client-side name collisions
+- **Keyed backends** - one route that spawns and pools a distinct child per runtime key (supplied as a per-call tool parameter), each child independently lifecycle-managed; add a new instance by configuration-free convention, not a new route
 - **Tool discovery** - automatic category-based tool activation for large backends
 - **Description truncation** - configurable max length for verbose tool descriptions
 - **Health endpoint** - per-backend status, PID, idle time
@@ -158,6 +159,101 @@ A composition merges the tool lists of its ordered members under one route.
   server's own filters.
 - Resources and prompts merge with the same last-wins rule.
 
+### Keyed backends
+
+A **keyed backend** is one route that serves a *family* of identical MCP servers
+that differ only by a runtime coordinate the client supplies per call (e.g. one
+SonarQube MCP server binary that must be bound to a specific SonarQube instance
+URL). Instead of declaring one route per instance, you declare a single route
+with one or more `params`; the gateway spawns and pools a distinct child process
+per distinct parameter value, and each child is an independent backend for
+lifecycle purposes (idle reap, credential TTL, restart, health).
+
+A server becomes keyed by adding a non-empty `params` list:
+
+```json
+{
+  "servers": {
+    "sonarqube": {
+      "command": ["bash", "/path/to/sonarqube-mcp/run.sh"],
+      "idle_timeout_seconds": 300,
+      "params": [
+        {
+          "name": "sonarURL",
+          "description": "Base URL of the target SonarQube instance.",
+          "validate": "^https://[A-Za-z0-9.-]+(/.*)?$"
+        }
+      ]
+    }
+  },
+  "backends": ["sonarqube"]
+}
+```
+
+**Param fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Required. The argument injected into every tool's input schema, and (by default) the environment variable the child receives. |
+| `description` | `string` | Help text shown to the client/LLM on the injected argument. |
+| `validate` | `string` | Optional regex. If set, the gateway rejects calls whose value does not match, before spawning. If omitted, the value passes through and the child is responsible for sanitizing it. |
+| `envName` | `string` | Optional. The environment variable name the child receives this value under. Defaults to `name`. |
+| `required` | `bool` | Optional. Defaults to `true`. |
+
+**How it behaves:**
+
+- **`tools/list`** returns the route's cached tool surface with each `param`
+  injected into every tool's `inputSchema` (added to `properties`, and to
+  `required` when the param is required). On a **cold** cache (no instance has
+  been used yet) it returns an **empty** tool list; the first `tools/call` warms
+  the shared cache, and subsequent `tools/list` calls are complete. The tool
+  surface is shared across all instances of the route.
+- **`tools/call`** reads the declared params from `arguments`, validates them,
+  computes a stable instance id = `sha256(values...)` truncated to 12 hex chars,
+  selects or lazily spawns the child for that id, **strips** the params from the
+  arguments, and forwards the rest to the child. The child is registered in the
+  lifecycle registry as `<route>/<id>`.
+- **Reuse and isolation:** two calls with identical param values hit the same
+  child process; different values spawn different children. A per-id spawn guard
+  ensures concurrent first-calls build exactly one child.
+- **Lifecycle:** each child uses the server's `idle_timeout_seconds`, is reaped
+  independently when idle (an idle instance dies while an active one stays up),
+  respects the credential-TTL sentinel, and is removed from the registry when it
+  exits so a later call re-spawns it fresh.
+
+**Contract: what a keyed child MCP server must do**
+
+The gateway stays generic: it transports the key and nothing more. All instance
+specifics (resolving a URL, loading a token, extra env, sanitization) belong to
+the child. To behave correctly as a keyed child, the spawned MCP server (usually
+a thin `run.sh` wrapper) must:
+
+1. **Read its binding from the environment**, not from tool arguments. The
+   gateway passes each param value as an environment variable named `envName`
+   (or `name` if `envName` is unset). The child must configure itself from these
+   (e.g. derive the backend URL, look up a credential) before serving.
+2. **Expose a tool surface that does not depend on the key.** All instances of a
+   keyed route share one cached tool list, so every instance must advertise the
+   same tools. (Per-instance tool differences are not supported.)
+3. **Ignore the injected params as call arguments.** The gateway strips them
+   before forwarding, so the child must not expect `name`/`envName` inside
+   `arguments`. The child receives a clean MCP `tools/call`.
+4. **Speak stdio MCP** (JSON-RPC over stdin/stdout) like any other stdio
+   backend: answer `initialize`, `tools/list`, and `tools/call`.
+5. **Fail cleanly when its binding is absent.** If the expected environment
+   variable is missing (e.g. no token for that instance), exit non-zero with a
+   clear stderr message. The gateway surfaces the failure rather than serving a
+   mis-bound instance.
+6. **Optionally emit the credential-TTL sentinel** (see
+   [Credential TTL recycling](#credential-ttl-recycling)) so the gateway recycles
+   the child before its credential expires.
+
+Adding a new instance therefore requires **no gateway or config change** — only
+whatever the child's contract needs (e.g. storing a new token the wrapper reads).
+
+See [docs/design/keyed-backends.md](docs/design/keyed-backends.md) for the full
+design.
+
 ### Backend types (servers)
 
 | Type | Detection | Description |
@@ -181,7 +277,9 @@ A composition merges the tool lists of its ordered members under one route.
 | `discovery` | `bool` | Force enable/disable tool discovery |
 | `categories` | `map` | Manual tool category assignments |
 | `log_enabled` | `bool` | Per-backend logging toggle |
+| `idle_timeout_seconds` | `int` | Override the global `idle_timeout_seconds` for this backend. Omit to inherit the global; `0` means never reap this backend (stays alive until the gateway exits); `>0` reaps after that many seconds of inactivity. Use `0` for long-lived backends like a browser (Chrome CDP) that must not be killed on the global cadence. |
 | `stop_grace_seconds` | `int` | Grace between SIGTERM and SIGKILL when stopping this backend's process group (overrides global `stop_grace_seconds`). Useful for servers that own heavy child processes (e.g. a browser) needing longer to tear down. |
+| `params` | `[]object` | Marks this server as a [keyed backend](#keyed-backends): a family of per-key child processes. Each param is `{ name, description?, validate?, envName?, required? }`. See [Keyed backends](#keyed-backends). |
 
 ## CA bundle injection
 
