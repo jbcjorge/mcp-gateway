@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean test test-report fmt vet shadow lint vuln gosec gitleaks cyclomatic cognitive check tools update-deps release warm version tag
+.PHONY: all build install uninstall clean test test-report fmt vet shadow lint vuln gosec gitleaks cyclomatic cognitive check tools update-deps release cross-compile warm version tag
 
 BINARY     := mcp-gateway
 PREFIX     ?= $(HOME)/.local/bin
@@ -188,8 +188,72 @@ clean:
 	rm -f $(BINARY)
 	rm -rf $(REPORTS_DIR) dist/
 
-## release: Cross-compile for distribution
-release: clean
+## release: Cut a release: update CHANGELOG from commits, commit, sign-tag, push
+## (usage: make release VERSION=v1.0.0 MESSAGE="what changed"). The tag push
+## triggers the Release workflow, which cross-compiles and publishes artifacts.
+release:
+ifndef VERSION
+	$(error VERSION is required. Usage: make release VERSION=v1.0.0 MESSAGE="what changed")
+endif
+ifndef MESSAGE
+	$(error MESSAGE is required. Usage: make release VERSION=v1.0.0 MESSAGE="what changed")
+endif
+	@echo "$(VERSION)" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$$' || { echo "ERROR: VERSION must be semver (e.g. v1.0.0)"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "ERROR: working tree is dirty; commit or stash first."; exit 1; }
+	@git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null && { echo "ERROR: tag $(VERSION) already exists."; exit 1; } || true
+	@# Build the CHANGELOG section from commits since the last tag. Subjects and
+	@# the message go through temp files so metacharacters are never spliced into
+	@# the shell or awk program. Merge commits and WIP/release-chore subjects are
+	@# excluded. Commit links point at GitHub (/commit/<sha>).
+	@prevtag=$$(git describe --tags --abbrev=0 2>/dev/null || true); \
+	if [ -n "$$prevtag" ]; then range="$$prevtag..HEAD"; echo "Collecting commits since $$prevtag..."; \
+	else range="HEAD"; echo "No previous tag; collecting full history (first release)..."; fi; \
+	remote=$$(git remote get-url origin 2>/dev/null); \
+	weburl=$$(echo "$$remote" | sed -E \
+		-e 's#^ssh://git@([^/:]+)(:[0-9]+)?/#https://\1/#' \
+		-e 's#^git@([^:]+):#https://\1/#' \
+		-e 's#^([A-Za-z0-9._-]+):([A-Za-z0-9._/-]+)$$#https://\1/\2#' \
+		-e 's#\.git$$##'); \
+	subjects_file=$$(mktemp); \
+	git log $$range --no-merges --invert-grep \
+		--grep='^wip' --grep='^fixup!' --grep='^squash!' --grep='^chore(release)' -i \
+		--pretty=format:'%H%x09%s' > "$$subjects_file"; printf '\n' >> "$$subjects_file"; \
+	if [ "$$(tr -d '[:space:]' < "$$subjects_file")" = "" ]; then \
+		echo "ERROR: no releasable commits since $$prevtag; nothing to release."; rm -f "$$subjects_file"; exit 1; fi; \
+	msg_file=$$(mktemp); printf '%s' "$(MESSAGE)" > "$$msg_file"; \
+	semver=$$(echo "$(VERSION)" | sed 's/^v//'); date=$$(date -u +%Y-%m-%d); \
+	echo "Writing CHANGELOG section [$$semver] ($$date)..."; \
+	section_file=$$(mktemp); \
+	{ printf '## [%s] - %s\n\n' "$$semver" "$$date"; cat "$$msg_file"; printf '\n\n'; \
+	  while IFS=$$(printf '\t') read -r sha subject; do [ -n "$$sha" ] || continue; \
+	    short=$$(printf '%s' "$$sha" | cut -c1-8); \
+	    if [ -n "$$weburl" ]; then printf -- '- %s ([%s](%s/commit/%s))\n' "$$subject" "$$short" "$$weburl" "$$sha"; \
+	    else printf -- '- %s (%s)\n' "$$subject" "$$short"; fi; \
+	  done < "$$subjects_file"; printf '\n'; } > "$$section_file"; \
+	tmp=$$(mktemp); \
+	awk -v secfile="$$section_file" 'function emit(l){while((getline l < secfile)>0)print l;close(secfile)} \
+		!done && /^## \[/ {emit();done=1} {print} END{if(!done){print "";emit()}}' CHANGELOG.md > "$$tmp" && mv "$$tmp" CHANGELOG.md; \
+	prevver=$$(echo "$$prevtag" | sed 's/^v//'); \
+	if [ -n "$$weburl" ] && [ -n "$$prevver" ]; then \
+	  awk -v nv="$$semver" -v pv="$$prevver" -v url="$$weburl" ' \
+	    /^\[Unreleased\]:/ { \
+	      printf "[Unreleased]: %s/compare/v%s...HEAD\n", url, nv; \
+	      printf "[%s]: %s/compare/v%s...v%s\n", nv, url, pv, nv; \
+	      ins=1; next } \
+	    {print} \
+	    END{if(!ins){printf "[%s]: %s/compare/v%s...v%s\n", nv, url, pv, nv}}' CHANGELOG.md > "$$tmp" && mv "$$tmp" CHANGELOG.md; \
+	fi; \
+	rm -f "$$subjects_file" "$$msg_file" "$$section_file"
+	@echo "Committing and tagging $(VERSION)..."
+	git add CHANGELOG.md
+	git commit -m "chore(release): $(VERSION)" -m "$(MESSAGE)"
+	git tag -a -s $(VERSION) -m "$(MESSAGE)"
+	git push origin HEAD
+	git push origin $(VERSION)
+	@echo "Released $(VERSION). The Release workflow will cross-compile and publish artifacts."
+
+## cross-compile: Cross-compile for distribution (produces dist/ artifacts)
+cross-compile: clean
 	@mkdir -p dist
 	GOOS=darwin  GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_darwin_arm64 .
 	GOOS=darwin  GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_darwin_amd64 .
