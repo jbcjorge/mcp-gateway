@@ -163,6 +163,7 @@ type Backend struct {
 	idleTimeout   time.Duration   // per-backend idle timeout (resolved): 0 = inherit global, neverReapIdle = never reap, >0 = reap after this duration
 	exited        chan struct{}   // closed by waitForExit when the process exits; enables graceful-stop detection
 	lastUsed      time.Time       // last time a request was forwarded
+	reapNotBefore time.Time       // idle reaper must not reap before this time (set from a tools/call's declared timeout); zero = no extension
 	toolsCache    json.RawMessage // cached tools/list response (nil = no cache)
 	toolsCachePid int             // pid of the backend that produced the cache
 

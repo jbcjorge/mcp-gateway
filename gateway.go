@@ -371,5 +371,25 @@ func (b *Backend) shouldReapLocked(now time.Time, globalTimeout time.Duration) b
 	if eff <= 0 {
 		return false // never reap
 	}
-	return now.Sub(b.lastUsed) > eff
+	if now.Sub(b.lastUsed) <= eff {
+		return false
+	}
+	// A request is in flight (e.g. a long-blocking wait_for_pipeline). The call
+	// does not send bytes while it waits, so lastUsed looks stale, but the
+	// backend is NOT idle. Never reap it from under an in-flight request.
+	if len(b.pending) > 0 {
+		slog.Debug("idle reap withheld: request in flight",
+			"backend", b.name, "in_flight", len(b.pending),
+			"idle", now.Sub(b.lastUsed).Round(time.Second))
+		return false
+	}
+	// A timed tools/call pushed the reap deadline out (see extendReapForCall).
+	// Honor it until it passes, then allow reaping a genuinely hung backend.
+	if !b.reapNotBefore.IsZero() && now.Before(b.reapNotBefore) {
+		slog.Debug("idle reap withheld: within declared-timeout extension",
+			"backend", b.name, "reap_not_before", b.reapNotBefore.Format(time.RFC3339),
+			"idle", now.Sub(b.lastUsed).Round(time.Second))
+		return false
+	}
+	return true
 }

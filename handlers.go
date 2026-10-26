@@ -246,6 +246,14 @@ func (gw *Gateway) forwardToBackend(ctx context.Context, backend *Backend, envel
 		return nil, ErrBackendStartFailed.Parse(errors.WithError(err))
 	}
 
+	// Before the (potentially long-blocking) send, extend this backend's reap
+	// deadline when the call declares a timeout. Otherwise the idle reaper would
+	// kill the backend mid-call once lastUsed goes stale (e.g. GitLab
+	// wait_for_pipeline with timeout_seconds > idle_timeout). See reap_extension.go.
+	if envelope.Method == "tools/call" {
+		gw.extendReapForCall(backend, body)
+	}
+
 	resp, err := backend.send(ctx, body)
 	if err != nil {
 		slog.Warn("send failed, restarting backend", "backend", backend.name, "error", err)
@@ -285,7 +293,35 @@ func (gw *Gateway) forwardToBackend(ctx context.Context, backend *Backend, envel
 	return resp, nil
 }
 
-// handleLocally responds to MCP lifecycle methods without spawning the backend.
+// extendReapForCall holds the idle reaper off a backend for the duration of a
+// tools/call that declares a timeout, so a long-blocking call (e.g. GitLab
+// wait_for_pipeline) is not reaped mid-flight. It is best-effort: calls with no
+// recognized timeout key are left untouched (the in-flight guard in
+// shouldReapLocked still protects them while pending). Logs at debug when an
+// extension is applied, for troubleshooting reap/timeout interactions.
+func (gw *Gateway) extendReapForCall(backend *Backend, body []byte) {
+	args, err := callArguments(body)
+	if err != nil || len(args) == 0 {
+		return
+	}
+	declared, key, ok := parseCallTimeout(args)
+	if !ok {
+		return
+	}
+	globalTimeout := time.Duration(gw.config.IdleTimeout) * time.Second
+	backend.mu.Lock()
+	effectiveIdle := effectiveIdleTimeout(backend.idleTimeout, globalTimeout)
+	deadline := extendedReapDeadline(time.Now(), declared, effectiveIdle)
+	backend.reapNotBefore = deadline
+	backend.mu.Unlock()
+	slog.Debug("reap extended for timed tools/call",
+		"backend", backend.name,
+		"timeout_key", key,
+		"declared", declared.Round(time.Second),
+		"effective_idle", effectiveIdle.Round(time.Second),
+		"reap_not_before", deadline.Format(time.RFC3339))
+}
+
 // Returns the response bytes and true if handled, or nil/false to forward to backend.
 func (gw *Gateway) handleLocally(env jsonRPCMessage, body []byte, b *Backend) ([]byte, bool) {
 	switch env.Method {
