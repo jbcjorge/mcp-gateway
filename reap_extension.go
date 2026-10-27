@@ -30,6 +30,10 @@ const (
 	// maxResponseTimeout caps the derived response wait so an absurd declared
 	// timeout cannot block a gateway worker indefinitely.
 	maxResponseTimeout = reapExtensionCap + responseHeadroom
+	// writeDeadlineBuffer is added to the response wait when extending the HTTP
+	// write deadline, so the server WriteTimeout outlives backend.send's own
+	// deadline (send fails first with a proper JSON-RPC error, not a dropped conn).
+	writeDeadlineBuffer = 15 * time.Second
 )
 
 // responseWait returns how long the gateway should wait for a backend response

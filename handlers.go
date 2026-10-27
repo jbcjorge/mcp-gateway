@@ -83,6 +83,12 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A long-blocking tools/call (e.g. GitLab wait_for_pipeline) can exceed the
+	// server's default WriteTimeout, which would abort the connection and cancel
+	// the request mid-call. Extend this response's write deadline to cover the
+	// call's declared timeout (short calls keep the default WriteTimeout).
+	extendWriteDeadlineForCall(w, envelope.Method, body)
+
 	resp, err := gw.dispatchRoute(r.Context(), route, envelope, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
@@ -296,6 +302,30 @@ func (gw *Gateway) forwardToBackend(ctx context.Context, backend *Backend, envel
 	}
 
 	return resp, nil
+}
+
+// extendWriteDeadlineForCall lifts the server's default WriteTimeout for a
+// long-blocking tools/call so the response isn't aborted mid-flight. It extends
+// to the call's response wait plus a small buffer (so backend.send's own
+// deadline fires first and returns a proper JSON-RPC error). Only tools/call
+// with a recognized declared timeout is extended; everything else keeps the
+// server default. Best-effort: if the ResponseWriter doesn't support deadline
+// control, it's a no-op.
+func extendWriteDeadlineForCall(w http.ResponseWriter, method string, body []byte) {
+	if method != "tools/call" {
+		return
+	}
+	declared, _, ok := parseDeclaredTimeout(body)
+	if !ok {
+		return
+	}
+	wait := responseWait(declared) + writeDeadlineBuffer
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Now().Add(wait)); err != nil {
+		slog.Debug("could not extend write deadline", "error", err)
+		return
+	}
+	slog.Debug("write deadline extended for timed tools/call", "deadline", wait.Round(time.Second))
 }
 
 // prepareCallContext derives a tools/call's declared timeout once and uses it to
