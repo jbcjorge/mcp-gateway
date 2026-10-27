@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-27
+
+Gateway resilience: survive long tool calls and fast connect handshakes
+
+- feat(handshake): populate resources/prompts caches from live backends ([5d77fa32](https://https///github.com/jbcjorge/mcp-gateway/commit/5d77fa32b979428be10d22466991cc80e03ec4ee))
+- fix(handshake): answer resources/prompts list locally without spawning ([0d00bb70](https://https///github.com/jbcjorge/mcp-gateway/commit/0d00bb7025649c3f9fff4a5a78fe25cf4e33dc97))
+- fix(send): honor declared tools/call timeout for backend response wait ([7108c7a0](https://https///github.com/jbcjorge/mcp-gateway/commit/7108c7a077c3c49e08cf48f2af91c1c910f1f1fc))
+- fix(reaper): keep backends alive during in-flight and timed tool calls ([a418a0e1](https://https///github.com/jbcjorge/mcp-gateway/commit/a418a0e18c2b7f1fbbb95e928b184e60a84a8bb3))
+- chore(deps): bump go toolchain to 1.27.3 (GO-2026-6809) ([425ecaaa](https://https///github.com/jbcjorge/mcp-gateway/commit/425ecaaad5e49074cb1b50e7ee2b04328ef91390))
+
 ## [0.5.0] - 2026-10-13
 
 ### Added
@@ -132,7 +142,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   description truncation, remote (SSE / streamable-HTTP) backends, and health
   endpoint.
 
-[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.5.0...HEAD
+[Unreleased]: https://https///github.com/jbcjorge/mcp-gateway/compare/v0.6.0...HEAD
+[0.6.0]: https://https///github.com/jbcjorge/mcp-gateway/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.2.0...v0.3.0
