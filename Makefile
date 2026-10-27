@@ -212,7 +212,7 @@ endif
 	weburl=$$(echo "$$remote" | sed -E \
 		-e 's#^ssh://git@([^/:]+)(:[0-9]+)?/#https://\1/#' \
 		-e 's#^git@([^:]+):#https://\1/#' \
-		-e 's#^([A-Za-z0-9._-]+):([A-Za-z0-9._/-]+)$$#https://\1/\2#' \
+		-e 's#^([A-Za-z0-9._-]+):([A-Za-z0-9._-][A-Za-z0-9._/-]*)$$#https://\1/\2#' \
 		-e 's#\.git$$##'); \
 	subjects_file=$$(mktemp); \
 	git log $$range --no-merges --invert-grep \
