@@ -152,20 +152,22 @@ type Backend struct {
 	cacheDir  string // directory for persistent cache files
 	cacheName string // tool-cache file basename override (empty = use name); keyed children share the route's cache
 
-	mu            sync.Mutex
-	cmd           *exec.Cmd
-	stdin         io.WriteCloser
-	stdout        *bufio.Reader
-	pending       map[string]chan json.RawMessage // id string -> response channel
-	running       bool
-	cancelFn      context.CancelFunc
-	stopGrace     time.Duration   // grace between SIGTERM and SIGKILL when stopping this backend's process group
-	idleTimeout   time.Duration   // per-backend idle timeout (resolved): 0 = inherit global, neverReapIdle = never reap, >0 = reap after this duration
-	exited        chan struct{}   // closed by waitForExit when the process exits; enables graceful-stop detection
-	lastUsed      time.Time       // last time a request was forwarded
-	reapNotBefore time.Time       // idle reaper must not reap before this time (set from a tools/call's declared timeout); zero = no extension
-	toolsCache    json.RawMessage // cached tools/list response (nil = no cache)
-	toolsCachePid int             // pid of the backend that produced the cache
+	mu             sync.Mutex
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	stdout         *bufio.Reader
+	pending        map[string]chan json.RawMessage // id string -> response channel
+	running        bool
+	cancelFn       context.CancelFunc
+	stopGrace      time.Duration   // grace between SIGTERM and SIGKILL when stopping this backend's process group
+	idleTimeout    time.Duration   // per-backend idle timeout (resolved): 0 = inherit global, neverReapIdle = never reap, >0 = reap after this duration
+	exited         chan struct{}   // closed by waitForExit when the process exits; enables graceful-stop detection
+	lastUsed       time.Time       // last time a request was forwarded
+	reapNotBefore  time.Time       // idle reaper must not reap before this time (set from a tools/call's declared timeout); zero = no extension
+	toolsCache     json.RawMessage // cached tools/list response (nil = no cache)
+	resourcesCache json.RawMessage // cached resources/list result object (nil = serve empty without spawning)
+	promptsCache   json.RawMessage // cached prompts/list result object (nil = serve empty without spawning)
+	toolsCachePid  int             // pid of the backend that produced the cache
 
 	// Credential TTL watcher state. A backend may emit a stderr sentinel
 	// "[[gateway:credential_expiry]] <unix-epoch>" after spawn, declaring when

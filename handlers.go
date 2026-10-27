@@ -123,6 +123,8 @@ func (gw *Gateway) dispatchComposite(ctx context.Context, route *Route, envelope
 		return gw.compositeToolsList(ctx, route, envelope.ID)
 	case "tools/call":
 		return gw.compositeToolsCall(ctx, route, envelope, body)
+	case methodResourcesList, methodResourceTemplates, methodPromptsList:
+		return route.primary().localListResponse(envelope.Method, envelope.ID), nil
 	default:
 		// Non-tool methods route to the primary member.
 		return gw.forwardToBackend(ctx, route.primary(), envelope, body)
@@ -231,6 +233,7 @@ func localInitializeResponse(id *json.RawMessage, routeName string) []byte {
 			"capabilities": map[string]any{
 				"tools":     map[string]any{"listChanged": true},
 				"resources": map[string]any{"listChanged": true},
+				"prompts":   map[string]any{"listChanged": true},
 			},
 			"serverInfo": map[string]any{"name": "mcp-gateway/" + routeName, "version": "1.0.0"},
 		},
@@ -348,6 +351,7 @@ func (gw *Gateway) handleLocally(env jsonRPCMessage, body []byte, b *Backend) ([
 				"capabilities": map[string]any{
 					"tools":     map[string]any{"listChanged": true},
 					"resources": map[string]any{"listChanged": true},
+					"prompts":   map[string]any{"listChanged": true},
 				},
 				"serverInfo": map[string]any{
 					"name":    "mcp-gateway/" + b.name,
@@ -373,6 +377,9 @@ func (gw *Gateway) handleLocally(env jsonRPCMessage, body []byte, b *Backend) ([
 
 	case "tools/list":
 		return b.handleToolsList(env.ID)
+
+	case methodResourcesList, methodResourceTemplates, methodPromptsList:
+		return b.localListResponse(env.Method, env.ID), true
 
 	case "tools/call":
 		return gw.handleDiscoverTools(env, body, b)
