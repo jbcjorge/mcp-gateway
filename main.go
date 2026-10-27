@@ -204,8 +204,10 @@ type jsonRPCMessage struct {
 // Gateway holds all backends and routes requests.
 type Gateway struct {
 	config      Config
+	configPath  string              // path to the main config file (for hot-reload of backends)
 	backends    map[string]*Backend // all member instances (keyed by instance name) for lifecycle
 	routes      map[string]*Route   // client-facing routes (keyed by route name)
+	routeSigs   map[string]string   // route name -> topology signature (for hot-reload diff)
 	authorizer  Authorizer
 	mu          sync.RWMutex
 	lastRequest time.Time // last time any request was received
@@ -260,6 +262,7 @@ func main() {
 		slog.Error("failed to build gateway from config", "error", gwErr)
 		os.Exit(exitFailure)
 	}
+	gw.configPath = configPath
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", gw.handleRequest)
@@ -292,19 +295,7 @@ func main() {
 		gw.shutdownAll()
 	}()
 
-	// Start backend idle reaper. Runs when a global timeout is set, or when any
-	// backend defines a per-backend idle timeout (so a backend can be reaped
-	// even if the global is 0 = never).
-	if cfg.IdleTimeout > 0 || gw.minBackendIdleTimeout() > 0 {
-		go gw.idleReaper(ctx, time.Duration(cfg.IdleTimeout)*time.Second)
-		slog.Info("backend idle reaper enabled", "global_timeout_seconds", cfg.IdleTimeout)
-	}
-
-	// Start self-idle timer (gateway exits after no requests)
-	if cfg.SelfIdleTimeout > 0 {
-		go gw.selfIdleTimer(ctx, stop, time.Duration(cfg.SelfIdleTimeout)*time.Second)
-		slog.Info("self-idle timer enabled", "timeout_seconds", cfg.SelfIdleTimeout)
-	}
+	gw.startBackgroundWorkers(ctx, stop)
 
 	slog.Info("mcp-gateway started", "version", Version, "commit", Commit, "addr", ln.Addr().String(), "pid", os.Getpid())
 	if err := server.Serve(ln); err != http.ErrServerClosed {

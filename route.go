@@ -211,6 +211,20 @@ func rewriteToolCallName(body []byte, realName string) ([]byte, error) {
 // primary returns the first member (used for non-list/get methods).
 func (rt *Route) primary() *Backend { return rt.members[0] }
 
+// allBackends returns every live backend owned by the route: its ordered
+// members plus any spawned keyed children. Used by hot-reload to stop a route's
+// whole process set on removal.
+func (rt *Route) allBackends() []*Backend {
+	out := make([]*Backend, 0, len(rt.members)+len(rt.children))
+	out = append(out, rt.members...)
+	rt.mu.Lock()
+	for _, b := range rt.children {
+		out = append(out, b)
+	}
+	rt.mu.Unlock()
+	return out
+}
+
 // callToolName extracts params.name from a tools/call body.
 func callToolName(body []byte) string {
 	var b struct {

@@ -23,13 +23,15 @@ func newGateway(cfg Config) (*Gateway, error) {
 
 	routeTokens := map[string][]string{}
 	gw := &Gateway{
-		config:   cfg,
-		backends: make(map[string]*Backend),
-		routes:   make(map[string]*Route),
+		config:    cfg,
+		backends:  make(map[string]*Backend),
+		routes:    make(map[string]*Route),
+		routeSigs: make(map[string]string),
 	}
 
 	for _, rr := range resolved {
 		gw.buildRoute(cfg, rr, routeTokens)
+		gw.routeSigs[rr.Name] = routeSignature(rr)
 	}
 
 	gw.authorizer = NewBearerAuthorizer(cfg.AuthTokens, routeTokens)
@@ -252,6 +254,24 @@ func (gw *Gateway) shutdownAll() {
 
 	for _, backend := range gw.backends {
 		backend.kill()
+	}
+}
+
+// startBackgroundWorkers launches the gateway's long-lived goroutines (idle
+// reaper, self-idle timer, config hot-reload watcher), each gated on its
+// enabling condition. Extracted from main to keep it a flat orchestration.
+func (gw *Gateway) startBackgroundWorkers(ctx context.Context, stop context.CancelFunc) {
+	cfg := gw.config
+	if cfg.IdleTimeout > 0 || gw.minBackendIdleTimeout() > 0 {
+		go gw.idleReaper(ctx, time.Duration(cfg.IdleTimeout)*time.Second)
+		slog.Info("backend idle reaper enabled", "global_timeout_seconds", cfg.IdleTimeout)
+	}
+	if cfg.SelfIdleTimeout > 0 {
+		go gw.selfIdleTimer(ctx, stop, time.Duration(cfg.SelfIdleTimeout)*time.Second)
+		slog.Info("self-idle timer enabled", "timeout_seconds", cfg.SelfIdleTimeout)
+	}
+	if gw.backendsFilePath() != "" {
+		go gw.configWatcher(ctx, configWatchInterval)
 	}
 }
 
