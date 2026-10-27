@@ -168,6 +168,7 @@ type Backend struct {
 	resourcesCache json.RawMessage // cached resources/list result object (nil = serve empty without spawning)
 	promptsCache   json.RawMessage // cached prompts/list result object (nil = serve empty without spawning)
 	toolsCachePid  int             // pid of the backend that produced the cache
+	listCachePid   int             // pid that produced the resources/prompts caches
 
 	// Credential TTL watcher state. A backend may emit a stderr sentinel
 	// "[[gateway:credential_expiry]] <unix-epoch>" after spawn, declaring when

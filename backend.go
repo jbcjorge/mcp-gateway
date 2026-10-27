@@ -315,6 +315,9 @@ func (b *Backend) initializeBackend() error {
 
 	// Refresh tools cache if this is a new backend process
 	b.refreshToolsCache()
+	// Capture resources/prompts lists from the same spawned process so later
+	// handshake calls serve the backend's real (verified) data without spawning.
+	b.refreshListCaches()
 
 	return nil
 }

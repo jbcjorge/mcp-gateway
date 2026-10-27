@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 )
@@ -73,4 +74,83 @@ func (b *Backend) cachedListResult(method string) json.RawMessage {
 		// resources/templates/list has no dedicated cache; always empty.
 		return nil
 	}
+}
+
+// refreshListCaches pulls the backend's real resources/list and prompts/list
+// once per backend process (gated by listCachePid) and caches the result
+// objects, so later connect-handshake calls are served the backend's actual
+// data without spawning. This runs only when the backend is ALREADY spawned
+// (right after init, alongside refreshToolsCache); it never spawns a backend
+// just to probe. A backend that returns empty (or errors / lacks the method)
+// is cached as the verified empty result, so "empty" is confirmed per backend
+// rather than assumed, and we do not re-probe on every call.
+func (b *Backend) refreshListCaches() {
+	b.mu.Lock()
+	pid := 0
+	if b.cmd != nil && b.cmd.Process != nil {
+		pid = b.cmd.Process.Pid
+	}
+	if pid == 0 || pid == b.listCachePid {
+		b.mu.Unlock()
+		return
+	}
+	b.mu.Unlock()
+
+	resources := b.captureListResult(methodResourcesList)
+	prompts := b.captureListResult(methodPromptsList)
+
+	b.mu.Lock()
+	b.resourcesCache = resources
+	b.promptsCache = prompts
+	b.listCachePid = pid
+	b.mu.Unlock()
+
+	slog.Info("resources/prompts caches refreshed from live backend",
+		"backend", b.name, "pid", pid,
+		"resources_empty", isEmptyListResult(resources, "resources"),
+		"prompts_empty", isEmptyListResult(prompts, "prompts"))
+}
+
+// captureListResult sends a list method to the live backend and returns its
+// result object. On any failure (send error, JSON-RPC error, missing result)
+// it returns the MCP-correct empty result for the method, so the cache always
+// holds a servable value and the method is not re-probed.
+func (b *Backend) captureListResult(method string) json.RawMessage {
+	empty, _ := json.Marshal(emptyListResult[method])
+	msg := []byte(`{"jsonrpc":"` + jsonRPCVersion + `","id":"_gw_` + method + `","method":"` + method + `","params":{}}`)
+	resp, err := b.send(context.Background(), msg)
+	if err != nil {
+		slog.Debug("list cache probe failed; caching empty", "backend", b.name, "method", method, "error", err)
+		return empty
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(resp, &env) != nil || env.Error != nil || env.Result == nil {
+		slog.Debug("list cache probe not usable; caching empty", "backend", b.name, "method", method)
+		return empty
+	}
+	return env.Result
+}
+
+// isEmptyListResult reports whether a cached result object's array under key is
+// empty or absent. Best-effort, for logging only.
+func isEmptyListResult(result json.RawMessage, key string) bool {
+	if result == nil {
+		return true
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(result, &m) != nil {
+		return false
+	}
+	arr, ok := m[key]
+	if !ok {
+		return true
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(arr, &items) != nil {
+		return false
+	}
+	return len(items) == 0
 }

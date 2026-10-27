@@ -69,6 +69,33 @@ func TestLocalListResponse_Empty(t *testing.T) {
 	}
 }
 
+func TestIsEmptyListResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		result string
+		key    string
+		want   bool
+	}{
+		{"nil result", "", "resources", true},
+		{"empty array", `{"resources":[]}`, "resources", true},
+		{"missing key", `{"other":[]}`, "resources", true},
+		{"non-empty array", `{"resources":[{"uri":"x://1"}]}`, "resources", false},
+		{"backend extra fields empty", `{"ttlMs":0,"cacheScope":"public","resources":[]}`, "resources", true},
+		{"prompts non-empty", `{"prompts":[{"name":"p"}]}`, "prompts", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw json.RawMessage
+			if tt.result != "" {
+				raw = json.RawMessage(tt.result)
+			}
+			if got := isEmptyListResult(raw, tt.key); got != tt.want {
+				t.Errorf("isEmptyListResult(%s,%q) = %v, want %v", tt.result, tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLocalListResponse_NotLocalMethod(t *testing.T) {
 	id := json.RawMessage(`1`)
 	b := &Backend{name: "probe"}
