@@ -246,12 +246,14 @@ func (gw *Gateway) forwardToBackend(ctx context.Context, backend *Backend, envel
 		return nil, ErrBackendStartFailed.Parse(errors.WithError(err))
 	}
 
-	// Before the (potentially long-blocking) send, extend this backend's reap
-	// deadline when the call declares a timeout. Otherwise the idle reaper would
-	// kill the backend mid-call once lastUsed goes stale (e.g. GitLab
-	// wait_for_pipeline with timeout_seconds > idle_timeout). See reap_extension.go.
+	// For a tools/call, derive the declared timeout once and use it to (a) hold
+	// the idle reaper off this backend and (b) set the response-wait deadline on
+	// ctx, so long-blocking calls (e.g. GitLab wait_for_job/wait_for_pipeline)
+	// are not cut off by the default 120s send timeout. See reap_extension.go.
 	if envelope.Method == "tools/call" {
-		gw.extendReapForCall(backend, body)
+		var cancel context.CancelFunc
+		ctx, cancel = gw.prepareCallContext(ctx, backend, body)
+		defer cancel()
 	}
 
 	resp, err := backend.send(ctx, body)
@@ -293,33 +295,45 @@ func (gw *Gateway) forwardToBackend(ctx context.Context, backend *Backend, envel
 	return resp, nil
 }
 
-// extendReapForCall holds the idle reaper off a backend for the duration of a
-// tools/call that declares a timeout, so a long-blocking call (e.g. GitLab
-// wait_for_pipeline) is not reaped mid-flight. It is best-effort: calls with no
-// recognized timeout key are left untouched (the in-flight guard in
-// shouldReapLocked still protects them while pending). Logs at debug when an
-// extension is applied, for troubleshooting reap/timeout interactions.
-func (gw *Gateway) extendReapForCall(backend *Backend, body []byte) {
+// prepareCallContext derives a tools/call's declared timeout once and uses it to
+// (1) hold the idle reaper off the backend for the call's duration and (2) set
+// the gateway's response-wait deadline on the returned context. Calls with no
+// recognized timeout key get the default response wait and no reap extension
+// (the in-flight guard in shouldReapLocked still protects them while pending).
+// Always returns a usable context and a non-nil cancel func. Logs at debug for
+// troubleshooting reap/timeout interactions.
+func (gw *Gateway) prepareCallContext(ctx context.Context, backend *Backend, body []byte) (context.Context, context.CancelFunc) {
+	declared, key, ok := parseDeclaredTimeout(body)
+
+	if ok {
+		globalTimeout := time.Duration(gw.config.IdleTimeout) * time.Second
+		backend.mu.Lock()
+		effectiveIdle := effectiveIdleTimeout(backend.idleTimeout, globalTimeout)
+		deadline := extendedReapDeadline(time.Now(), declared, effectiveIdle)
+		backend.reapNotBefore = deadline
+		backend.mu.Unlock()
+		slog.Debug("reap extended for timed tools/call",
+			"backend", backend.name, "timeout_key", key,
+			"declared", declared.Round(time.Second),
+			"effective_idle", effectiveIdle.Round(time.Second),
+			"reap_not_before", deadline.Format(time.RFC3339))
+	}
+
+	wait := responseWait(declared)
+	slog.Debug("response wait set for tools/call",
+		"backend", backend.name, "response_wait", wait.Round(time.Second), "declared_timeout", ok)
+	return context.WithTimeout(ctx, wait)
+}
+
+// parseDeclaredTimeout best-effort extracts a declared timeout from a tools/call
+// body's arguments. Returns 0,"",false when the body has no recognized numeric
+// timeout key.
+func parseDeclaredTimeout(body []byte) (time.Duration, string, bool) {
 	args, err := callArguments(body)
 	if err != nil || len(args) == 0 {
-		return
+		return 0, "", false
 	}
-	declared, key, ok := parseCallTimeout(args)
-	if !ok {
-		return
-	}
-	globalTimeout := time.Duration(gw.config.IdleTimeout) * time.Second
-	backend.mu.Lock()
-	effectiveIdle := effectiveIdleTimeout(backend.idleTimeout, globalTimeout)
-	deadline := extendedReapDeadline(time.Now(), declared, effectiveIdle)
-	backend.reapNotBefore = deadline
-	backend.mu.Unlock()
-	slog.Debug("reap extended for timed tools/call",
-		"backend", backend.name,
-		"timeout_key", key,
-		"declared", declared.Round(time.Second),
-		"effective_idle", effectiveIdle.Round(time.Second),
-		"reap_not_before", deadline.Format(time.RFC3339))
+	return parseCallTimeout(args)
 }
 
 // Returns the response bytes and true if handled, or nil/false to forward to backend.

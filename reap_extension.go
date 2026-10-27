@@ -18,7 +18,34 @@ const (
 	// reapExtensionFloor is the minimum extension applied when a call declares a
 	// timeout, covering tiny or zero declared values.
 	reapExtensionFloor = 1 * time.Minute
+
+	// defaultResponseTimeout bounds how long the gateway waits for a backend's
+	// JSON-RPC response when the call declares no timeout. Long-blocking calls
+	// (wait_for_job/wait_for_pipeline) declare one and get responseWait() below.
+	defaultResponseTimeout = 120 * time.Second
+	// responseHeadroom is added above a call's declared timeout so the backend's
+	// own timeout fires first and returns a proper response, rather than the
+	// gateway cutting the request off at exactly the declared value.
+	responseHeadroom = 30 * time.Second
+	// maxResponseTimeout caps the derived response wait so an absurd declared
+	// timeout cannot block a gateway worker indefinitely.
+	maxResponseTimeout = reapExtensionCap + responseHeadroom
 )
+
+// responseWait returns how long the gateway should wait for a backend response
+// to a tools/call, given the call's declared timeout (0 when none was found).
+// With no declared timeout it is defaultResponseTimeout; otherwise it is the
+// declared timeout plus headroom, capped at maxResponseTimeout.
+func responseWait(declared time.Duration) time.Duration {
+	if declared <= 0 {
+		return defaultResponseTimeout
+	}
+	w := declared + responseHeadroom
+	if w > maxResponseTimeout {
+		return maxResponseTimeout
+	}
+	return w
+}
 
 // timeoutKeysSeconds are tools/call argument keys whose numeric value is a
 // timeout expressed in SECONDS. Matched in order; the largest value wins.

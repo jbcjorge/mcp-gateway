@@ -369,7 +369,16 @@ func (b *Backend) send(ctx context.Context, msg []byte) ([]byte, error) {
 		return nil, ErrWritePipe.Parse(errors.WithError(err))
 	}
 
-	// Wait for response with timeout or context cancellation
+	// Wait for response. The response deadline comes from ctx when the caller
+	// set one (forwardToBackend derives it from a tools/call's declared
+	// timeout, so long waits like wait_for_job are not cut off early). When ctx
+	// has no deadline, fall back to defaultResponseTimeout.
+	var timeoutCh <-chan time.Time
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		t := time.NewTimer(defaultResponseTimeout)
+		defer t.Stop()
+		timeoutCh = t.C
+	}
 	select {
 	case resp, ok := <-ch:
 		if !ok {
@@ -381,7 +390,7 @@ func (b *Backend) send(ctx context.Context, msg []byte) ([]byte, error) {
 		delete(b.pending, idKey)
 		b.mu.Unlock()
 		return nil, ErrBackendTimeout.Parse(errors.WithError(ctx.Err()))
-	case <-time.After(120 * time.Second):
+	case <-timeoutCh:
 		b.mu.Lock()
 		delete(b.pending, idKey)
 		b.mu.Unlock()

@@ -19,6 +19,27 @@ func rawArgs(t *testing.T, m map[string]any) map[string]json.RawMessage {
 	return out
 }
 
+func TestResponseWait(t *testing.T) {
+	tests := []struct {
+		name     string
+		declared time.Duration
+		want     time.Duration
+	}{
+		{"no declared timeout uses default", 0, defaultResponseTimeout},
+		{"negative treated as none", -5 * time.Second, defaultResponseTimeout},
+		{"declared plus headroom", 300 * time.Second, 300*time.Second + responseHeadroom},
+		{"wait_for_job 300s", 300 * time.Second, 330 * time.Second},
+		{"absurd clamped to cap", 10 * time.Hour, maxResponseTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := responseWait(tt.declared); got != tt.want {
+				t.Errorf("responseWait(%v) = %v, want %v", tt.declared, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseCallTimeout(t *testing.T) {
 	tests := []struct {
 		name    string
