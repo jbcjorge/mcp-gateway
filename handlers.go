@@ -28,6 +28,12 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// OAuth-broker endpoints (discovery, /authorize, /token) for routes that
+	// declare an auth hook. Handled before the POST-only MCP check below.
+	if gw.handleOAuth(w, r) {
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -89,6 +95,10 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// call's declared timeout (short calls keep the default WriteTimeout).
 	extendWriteDeadlineForCall(w, envelope.Method, body)
 
+	// For OAuth-hook routes, pass the client's bearer to the backend in-band via
+	// params._meta.authorization (stdio has no header channel). No-op otherwise.
+	body = gw.injectAuthMeta(path, envelope.Method, r, body)
+
 	resp, err := gw.dispatchRoute(r.Context(), route, envelope, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
@@ -96,6 +106,48 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gw.writeResponse(w, r, resp)
+}
+
+// injectAuthMeta, for a tools/call to a route that declares an auth hook, copies
+// the client's Authorization bearer into the JSON-RPC params._meta.authorization
+// so the (auth-free) stdio backend receives the upstream token per request. It
+// is a no-op (returns body unchanged) for non-tools/call, non-hook routes, or a
+// missing header. _meta is the MCP-reserved extension slot, ignored by servers
+// that don't read it.
+func (gw *Gateway) injectAuthMeta(routeName, method string, r *http.Request, body []byte) []byte {
+	if method != "tools/call" || gw.authHookFor(routeName) == nil {
+		return body
+	}
+	authz := r.Header.Get("Authorization")
+	if authz == "" {
+		return body
+	}
+	var msg map[string]json.RawMessage
+	if json.Unmarshal(body, &msg) != nil {
+		return body
+	}
+	params := map[string]json.RawMessage{}
+	if raw, ok := msg["params"]; ok {
+		if json.Unmarshal(raw, &params) != nil {
+			return body
+		}
+	}
+	meta := map[string]json.RawMessage{}
+	if raw, ok := params["_meta"]; ok {
+		_ = json.Unmarshal(raw, &meta) // tolerate/overwrite on malformed
+	}
+	authzJSON, _ := json.Marshal(authz)
+	meta["authorization"] = authzJSON
+	metaJSON, _ := json.Marshal(meta)
+	params["_meta"] = metaJSON
+	paramsJSON, _ := json.Marshal(params)
+	msg["params"] = paramsJSON
+	out, err := json.Marshal(msg)
+	if err != nil {
+		return body
+	}
+	slog.Debug("injected auth into tools/call _meta for hook route", "route", routeName)
+	return out
 }
 
 // dispatchRoute handles a request for a route. Single-member routes with no

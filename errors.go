@@ -11,8 +11,11 @@ import (
 
 // Auth errors
 var (
-	ErrAuthRequired = errors.New("authorization required")
-	ErrInvalidToken = errors.New("invalid token")
+	ErrAuthRequired    = errors.New("authorization required")
+	ErrInvalidToken    = errors.New("invalid token")
+	ErrAuthHookMissing = errors.New("auth hook has no provider command")
+	ErrAuthHookFailed  = errors.New("auth hook provider command failed")
+	ErrAuthHookEmpty   = errors.New("auth hook provider returned no token")
 )
 
 // Config errors

@@ -72,6 +72,22 @@ type Config struct {
 	Routes       []RouteEntry              `json:"backends"`
 }
 
+// AuthHook declares how the gateway obtains a backend's upstream credential for
+// the OAuth broker. Provider is a command run by the gateway that prints the
+// bearer token to stdout (optionally JSON {"token":...,"expires_at":<unix>});
+// a non-zero exit means auth failed. TokenFormat "jwt" makes the gateway read
+// the token's exp claim; otherwise TTLSeconds is used. Expose selects the token
+// model: "real" (default, IMPLEMENTED) returns the upstream token to the client
+// so the gateway stays token-stateless; "opaque" (declared but NOT yet
+// implemented) would keep the real token server-side behind a handle.
+// See docs/design/auth-broker.md.
+type AuthHook struct {
+	Provider    []string `json:"provider"`     // command -> prints token to stdout
+	TokenFormat string   `json:"token_format"` // "jwt" (read exp) | "opaque" (use ttl); default jwt
+	TTLSeconds  int      `json:"ttl_seconds"`  // fallback validity when exp is unknown
+	Expose      string   `json:"expose"`       // "real" (default, implemented) | "opaque" (future, not implemented)
+}
+
 // BackendDef defines a backend MCP subprocess or remote server.
 type BackendDef struct {
 	Command      []string            `json:"command"`
@@ -89,6 +105,12 @@ type BackendDef struct {
 	// Per-backend options
 	AuthTokens []string `json:"auth_tokens"` // bearer tokens for this backend (overrides global)
 	LogEnabled *bool    `json:"log_enabled"` // nil=inherit global, true=verbose, false=quiet
+
+	// Auth, when set, makes this route participate in the gateway OAuth broker:
+	// MCP clients authenticate via the gateway's /authorize + /token, and the
+	// gateway runs Auth.Provider to obtain the upstream token. Nil = no OAuth
+	// (client connects unauthenticated, as today). See docs/design/auth-broker.md.
+	Auth *AuthHook `json:"auth"`
 
 	// IdleTimeoutSeconds overrides the global idle_timeout_seconds for this
 	// backend. nil = inherit global, 0 = never reap (stays alive until the
@@ -208,6 +230,7 @@ type Gateway struct {
 	backends    map[string]*Backend // all member instances (keyed by instance name) for lifecycle
 	routes      map[string]*Route   // client-facing routes (keyed by route name)
 	routeSigs   map[string]string   // route name -> topology signature (for hot-reload diff)
+	oauth       *oauthStore         // OAuth-broker code/token store
 	authorizer  Authorizer
 	mu          sync.RWMutex
 	lastRequest time.Time // last time any request was received

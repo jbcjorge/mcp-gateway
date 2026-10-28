@@ -27,6 +27,7 @@ func newGateway(cfg Config) (*Gateway, error) {
 		backends:  make(map[string]*Backend),
 		routes:    make(map[string]*Route),
 		routeSigs: make(map[string]string),
+		oauth:     newOAuthStore(),
 	}
 
 	for _, rr := range resolved {
