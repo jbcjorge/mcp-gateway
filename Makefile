@@ -106,9 +106,16 @@ cognitive:
 		exit 1; \
 	fi
 
-## test: Run tests
+## test: Run tests with the race detector, write a coverage report, and fail
+## below COVERAGE_MIN percent (raw total, no exclusions; see go-makefile standard)
+COVERAGE_MIN ?= 80
 test:
-	go test -count=1 ./...
+	@mkdir -p $(REPORTS_DIR)
+	go test -count=1 -race -coverprofile=$(REPORTS_DIR)/coverage.out ./...
+	@go tool cover -func=$(REPORTS_DIR)/coverage.out | awk -v min=$(COVERAGE_MIN) \
+		'/^total:/ { pct = $$3; sub("%", "", pct); \
+		  printf "coverage: %s%% (minimum %s%%)\n", pct, min; \
+		  if (pct + 0 < min + 0) { print "coverage below threshold"; exit 1 } }'
 
 ## test-report: Run tests with coverage and JUnit reports (for CI)
 test-report:

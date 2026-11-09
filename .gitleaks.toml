@@ -1,0 +1,11 @@
+# gitleaks runs with --no-git in `make check`, so it scans the working tree.
+# Exclude generated, gitignored artifacts (coverage/JUnit reports) that can
+# contain hashes or encoded strings and trigger false positives.
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "generated reports"
+  paths = [
+    '''reports/''',
+  ]
