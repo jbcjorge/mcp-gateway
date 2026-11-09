@@ -34,6 +34,10 @@ var (
 	ErrUnknownBackend   = errors.New("unknown backend: %s")
 	ErrInvalidJSON      = errors.New("invalid JSON-RPC request")
 	ErrReadBody         = errors.New("failed to read request body")
+	// ErrDiscoverUnsupported answers the server/discover version-negotiation
+	// probe. The gateway speaks the legacy initialize handshake, so it reports
+	// method-not-found and clients fall back to initialize.
+	ErrDiscoverUnsupported = errors.New("method not found: server/discover")
 )
 
 // Backend lifecycle errors

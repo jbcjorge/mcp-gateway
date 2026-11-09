@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -329,5 +330,98 @@ func TestKeyed_DistinctInstancesUseDistinctProcesses(t *testing.T) {
 	}
 	if pidA == pidB {
 		t.Errorf("distinct instances must use distinct processes, both were pid=%d", pidA)
+	}
+}
+
+// Non-tool, instance-scoped methods resolve the child from the routing params
+// and are forwarded to that child.
+func TestKeyedForwardOther_RoutesToInstance(t *testing.T) {
+	gw := gatewayWithKeyed(t)
+	defer gw.shutdownAll()
+
+	body := `{"jsonrpc":"2.0","id":3,"method":"custom/instanceScoped","params":{"sonarUrl":"https://a.example"}}`
+	w := postJSON(t, gw, "/sonarqube/mcp", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("forward: %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Result struct {
+			Instance string `json:"instance"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v body=%s", err, w.Body.String())
+	}
+	if resp.Result.Instance != "https://a.example" {
+		t.Errorf("forwarded to instance %q, want https://a.example", resp.Result.Instance)
+	}
+}
+
+func TestKeyedForwardOther_MissingParamRejected(t *testing.T) {
+	gw := gatewayWithKeyed(t)
+	defer gw.shutdownAll()
+
+	w := postJSON(t, gw, "/sonarqube/mcp", `{"jsonrpc":"2.0","id":4,"method":"custom/instanceScoped","params":{}}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for missing routing param, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"error"`) {
+		t.Errorf("expected a JSON-RPC error, got %s", w.Body.String())
+	}
+}
+
+// Clients list resources/templates/prompts on connect without routing params.
+// Keyed routes must answer these locally (like single and composite routes)
+// instead of failing on the missing instance params, and must not spawn.
+func TestDispatchKeyed_ListMethodsServedLocally(t *testing.T) {
+	gw := gatewayWithKeyed(t)
+	defer gw.shutdownAll()
+
+	tests := []struct {
+		method string
+		key    string
+	}{
+		{methodResourcesList, "resources"},
+		{methodResourceTemplates, "resourceTemplates"},
+		{methodPromptsList, "prompts"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			w := postJSON(t, gw, "/sonarqube/mcp", `{"jsonrpc":"2.0","id":5,"method":"`+tt.method+`","params":{}}`)
+			assertListResult(t, w, tt.method, tt.key)
+		})
+	}
+	assertNoKeyedChildRunning(t, gw, "sonarqube")
+}
+
+// assertListResult checks a list-method reply is a JSON-RPC success whose
+// result carries the method's array key.
+func assertListResult(t *testing.T, w *httptest.ResponseRecorder, method, key string) {
+	t.Helper()
+	if w.Code != http.StatusOK {
+		t.Fatalf("%s: %d body=%s", method, w.Code, w.Body.String())
+	}
+	var resp struct {
+		Result map[string]json.RawMessage `json:"result"`
+		Error  json.RawMessage            `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v body=%s", err, w.Body.String())
+	}
+	if resp.Error != nil {
+		t.Fatalf("%s returned error: %s", method, w.Body.String())
+	}
+	if _, ok := resp.Result[key]; !ok {
+		t.Errorf("%s result missing %q: %s", method, key, w.Body.String())
+	}
+}
+
+// assertNoKeyedChildRunning fails if any keyed child of route was spawned.
+func assertNoKeyedChildRunning(t *testing.T, gw *Gateway, route string) {
+	t.Helper()
+	for name, b := range gw.backends {
+		if isChildInstanceName(route, name) && b.isRunning() {
+			t.Errorf("must not spawn keyed child %s", name)
+		}
 	}
 }

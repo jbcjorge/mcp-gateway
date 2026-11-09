@@ -603,3 +603,54 @@ func TestSaveToolsCache_Success(t *testing.T) {
 		t.Errorf("unexpected cache content: %s", string(data))
 	}
 }
+
+// Composite members are named "<route>/<server>". The cache file must land
+// directly in cacheDir (not a non-existent subdirectory) and round-trip.
+func TestSaveAndLoadToolsCache_CompositeMemberName(t *testing.T) {
+	dir := t.TempDir()
+	toolsJSON := `{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"tool1"}]}}`
+
+	b := &Backend{
+		name:       "wiki/confluence-official",
+		cacheDir:   dir,
+		toolsCache: json.RawMessage(toolsJSON),
+	}
+	b.saveToolsCache()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read cache dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].IsDir() {
+		t.Fatalf("expected exactly one cache file in cacheDir, got %v", entries)
+	}
+
+	b2 := &Backend{
+		name:     "wiki/confluence-official",
+		cacheDir: dir,
+	}
+	b2.loadToolsCache()
+	if string(b2.toolsCache) != toolsJSON {
+		t.Errorf("cache mismatch: got %q", string(b2.toolsCache))
+	}
+}
+
+func TestToolsCachePath_Escaping(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"gitlab", "gitlab.json"},
+		{"ox-security", "ox-security.json"},
+		{"wiki/confluence-official", "wiki%2Fconfluence-official.json"},
+		{"../escape", "..%2Fescape.json"},
+		{"a%2Fb", "a%252Fb.json"},
+	}
+	for _, tt := range tests {
+		b := &Backend{name: tt.name, cacheDir: "/cache"}
+		got := b.toolsCachePath()
+		if want := filepath.Join("/cache", tt.want); got != want {
+			t.Errorf("toolsCachePath(%q) = %q, want %q", tt.name, got, want)
+		}
+	}
+}

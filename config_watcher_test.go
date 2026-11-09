@@ -186,3 +186,25 @@ func writeJSON(t *testing.T, path string, v any) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestBackendsFilePath(t *testing.T) {
+	tests := []struct {
+		name         string
+		configPath   string
+		backendsFile string
+		want         string
+	}{
+		{"inlined topology", "/etc/gw/config.json", "", ""},
+		{"no config path", "", "backends.json", ""},
+		{"relative to config dir", "/etc/gw/config.json", "backends.json", "/etc/gw/backends.json"},
+		{"absolute kept", "/etc/gw/config.json", "/opt/b.json", "/opt/b.json"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gw := &Gateway{configPath: tt.configPath, config: Config{BackendsFile: tt.backendsFile}}
+			if got := gw.backendsFilePath(); got != tt.want {
+				t.Errorf("backendsFilePath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

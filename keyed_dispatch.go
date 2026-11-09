@@ -26,6 +26,11 @@ func (gw *Gateway) dispatchKeyed(ctx context.Context, route *Route, envelope jso
 		return gw.keyedToolsList(route, envelope.ID)
 	case "tools/call":
 		return gw.keyedToolsCall(ctx, route, envelope, body)
+	case methodResourcesList, methodResourceTemplates, methodPromptsList:
+		// Clients list these on connect without routing params, so no instance
+		// can be resolved. Answer locally with the empty result (keyed routes
+		// have no per-instance cache to serve) instead of failing and spawning.
+		return listResponse(route.name, envelope.Method, envelope.ID, nil), nil
 	default:
 		// Non-tool methods are instance-scoped: resolve the child from the
 		// routing params and forward.

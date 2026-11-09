@@ -83,9 +83,8 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle subscriptions/listen - long-lived SSE stream
-	if envelope.Method == "subscriptions/listen" {
-		gw.handleSubscriptionsListen(w, r, envelope)
+	// Protocol-level methods answered before any route dispatch (never spawn).
+	if gw.handleProtocolMethod(w, r, envelope, path) {
 		return
 	}
 
@@ -189,33 +188,47 @@ func (gw *Gateway) dispatchComposite(ctx context.Context, route *Route, envelope
 	}
 }
 
-// compositeToolsList fetches each member's tools/list (spawning as needed),
-// merges + prefixes, and returns the merged result wrapped in a JSON-RPC reply.
+// compositeToolsList merges each member's tools/list (cache-first, spawning a
+// member only when it has no cached tools), prefixes, and returns the merged
+// result wrapped in a JSON-RPC reply.
 func (gw *Gateway) compositeToolsList(ctx context.Context, route *Route, id *json.RawMessage) ([]byte, error) {
 	merged, err := route.toolsList(func(b *Backend) (json.RawMessage, error) {
-		if err := b.ensureRunning(); err != nil {
-			return nil, err
-		}
-		listReq := []byte(`{"jsonrpc":"2.0","id":"_gw_tools","method":"tools/list","params":{}}`)
-		resp, err := b.send(ctx, listReq)
-		if err != nil {
-			return nil, err
-		}
-		// Extract the "result" object from the member's JSON-RPC response.
-		var env struct {
-			Result json.RawMessage `json:"result"`
-		}
-		if uerr := json.Unmarshal(resp, &env); uerr != nil {
-			return nil, uerr
-		}
-		// Apply this member's include/exclude tool filters before merging.
-		return filterResultTools(env.Result, b), nil
+		return memberToolsResult(ctx, b)
 	})
 	if err != nil {
 		return nil, err
 	}
 	reply, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": json.RawMessage(merged)})
 	return reply, nil
+}
+
+// memberToolsResult returns one composite member's filtered tools/list result.
+// It serves the member's tools cache when present so a client connect (which
+// lists tools for every route) never spawns members, matching single-route
+// behaviour. Only a member with no cache is spawned and queried live; that
+// first spawn populates the cache via refreshToolsCache.
+func memberToolsResult(ctx context.Context, b *Backend) (json.RawMessage, error) {
+	if cached := b.cachedToolsResult(); cached != nil {
+		slog.Debug("composite member tools/list served from cache (no spawn)", "backend", b.name)
+		return filterResultTools(cached, b), nil
+	}
+	if err := b.ensureRunning(); err != nil {
+		return nil, err
+	}
+	listReq := []byte(`{"jsonrpc":"2.0","id":"_gw_tools","method":"tools/list","params":{}}`)
+	resp, err := b.send(ctx, listReq)
+	if err != nil {
+		return nil, err
+	}
+	// Extract the "result" object from the member's JSON-RPC response.
+	var env struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if uerr := json.Unmarshal(resp, &env); uerr != nil {
+		return nil, uerr
+	}
+	// Apply this member's include/exclude tool filters before merging.
+	return filterResultTools(env.Result, b), nil
 }
 
 // filterResultTools returns a copy of a tools/list result with tools that fail
@@ -419,6 +432,34 @@ func parseDeclaredTimeout(body []byte) (time.Duration, string, bool) {
 		return 0, "", false
 	}
 	return parseCallTimeout(args)
+}
+
+// methodServerDiscover is the MCP version-negotiation probe that newer clients
+// (kiro-cli 2.37+) send on connect, before initialize.
+const methodServerDiscover = "server/discover"
+
+// handleProtocolMethod answers protocol-level methods that apply to every route
+// type (single, composite, keyed) before dispatch, so none of them can spawn a
+// backend. Returns true if the request was fully handled.
+//
+// server/discover: the gateway speaks the legacy initialize handshake (served
+// locally by handleLocally), so it answers method-not-found. Clients classify
+// any JSON-RPC error on this probe as "legacy server" and fall back to
+// initialize. Forwarding it instead would spawn every backend on every client
+// connect, defeating lazy spawn, and slow or misbehaving backends would stall
+// the client's connect until its timeout.
+func (gw *Gateway) handleProtocolMethod(w http.ResponseWriter, r *http.Request, env jsonRPCMessage, route string) bool {
+	switch env.Method {
+	case "subscriptions/listen":
+		gw.handleSubscriptionsListen(w, r, env)
+		return true
+	case methodServerDiscover:
+		slog.Debug("server/discover answered locally (legacy, no spawn)", "route", route)
+		gw.writeResponse(w, r, jsonRPCError(env.ID, CodeMethodNotFound, ErrDiscoverUnsupported.Parse()))
+		return true
+	default:
+		return false
+	}
 }
 
 // Returns the response bytes and true if handled, or nil/false to forward to backend.

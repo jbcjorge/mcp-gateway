@@ -818,3 +818,143 @@ func TestWriteResponse_EmptyBody(t *testing.T) {
 		t.Errorf("expected 202 for empty response, got %d", w.Code)
 	}
 }
+
+// assertDiscoverMethodNotFound checks a server/discover response is a JSON-RPC
+// method-not-found error echoing the request id. Clients (kiro-cli) classify
+// any JSON-RPC error on this probe as "legacy server" and fall back to
+// initialize, which the gateway serves locally.
+func assertDiscoverMethodNotFound(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusOK {
+		t.Fatalf("server/discover: expected HTTP 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		ID    string `json:"id"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if resp.Error == nil || resp.Error.Code != CodeMethodNotFound {
+		t.Fatalf("expected error code %d, got body=%s", CodeMethodNotFound, w.Body.String())
+	}
+	if resp.ID != "server-discover-probe-1" {
+		t.Errorf("expected id echoed, got %q", resp.ID)
+	}
+}
+
+const discoverProbeBody = `{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{}}`
+
+func TestHandleProtocolMethod_ServerDiscoverNoSpawn(t *testing.T) {
+	gw := newTestGateway(map[string]BackendDef{
+		"mybackend": {Command: []string{"should-not-spawn"}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/mybackend/mcp", strings.NewReader(discoverProbeBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+	gw.handleRequest(w, req)
+
+	assertDiscoverMethodNotFound(t, w)
+	if gw.backends["mybackend"].isRunning() {
+		t.Error("backend must not be spawned for server/discover")
+	}
+}
+
+func TestHandleProtocolMethod_KeyedServerDiscover(t *testing.T) {
+	gw := gatewayWithKeyed(t)
+	defer gw.shutdownAll()
+
+	w := postJSON(t, gw, "/sonarqube/mcp", discoverProbeBody)
+	assertDiscoverMethodNotFound(t, w)
+}
+
+func TestHandleProtocolMethod_OtherMethodsNotHandled(t *testing.T) {
+	gw := newTestGateway(map[string]BackendDef{
+		"mybackend": {Command: []string{"should-not-spawn"}},
+	})
+	id := json.RawMessage(`1`)
+
+	tests := []string{"initialize", "tools/list", "tools/call", "ping", "resources/list"}
+	for _, method := range tests {
+		req := httptest.NewRequest(http.MethodPost, "/mybackend/mcp", nil)
+		w := httptest.NewRecorder()
+		env := jsonRPCMessage{JSONRPC: "2.0", ID: &id, Method: method}
+		if gw.handleProtocolMethod(w, req, env, "mybackend") {
+			t.Errorf("handleProtocolMethod(%q) = true, want false", method)
+		}
+		if w.Body.Len() != 0 {
+			t.Errorf("handleProtocolMethod(%q) wrote a response, want none: %s", method, w.Body.String())
+		}
+	}
+}
+
+// A tools/call that declares a timeout must have its response delivered even
+// when it outlives the server's WriteTimeout; other requests keep the default
+// deadline (and lose a response written after it).
+func TestExtendWriteDeadlineForCall_SurvivesServerWriteTimeout(t *testing.T) {
+	const writeTimeout = 100 * time.Millisecond
+	const work = 3 * writeTimeout
+
+	tests := []struct {
+		name     string
+		method   string
+		body     string
+		wantBody bool
+	}{
+		{"timed tools/call extended", "tools/call", `{"params":{"name":"wait","arguments":{"timeout_seconds":1}}}`, true},
+		{"tools/call without timeout keeps default", "tools/call", `{"params":{"name":"x","arguments":{}}}`, false},
+		{"non tools/call keeps default", "tools/list", `{"params":{"arguments":{"timeout_seconds":1}}}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := slowWriteServer(t, tt.method, tt.body, writeTimeout, work)
+			got := fetchBody(t, srv.URL)
+			if (got == "done") != tt.wantBody {
+				t.Errorf("response delivered = %v, want %v (body %q)", got == "done", tt.wantBody, got)
+			}
+		})
+	}
+}
+
+// slowWriteServer starts a server with the given WriteTimeout whose handler
+// applies extendWriteDeadlineForCall for (method, body), works for `work`, then
+// writes "done". Closed automatically at test end.
+func slowWriteServer(t *testing.T, method, body string, writeTimeout, work time.Duration) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		extendWriteDeadlineForCall(w, method, []byte(body))
+		time.Sleep(work)
+		// The write error is intentionally ignored: for the non-extended cases
+		// the deadline has passed and the write is expected to fail; the test
+		// asserts on what the client received instead.
+		_, _ = io.WriteString(w, "done")
+	}))
+	srv.Config.WriteTimeout = writeTimeout
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// fetchBody GETs target and returns the body, or "" when the connection was cut
+// (the expected outcome when a write deadline expires mid-response).
+func fetchBody(t *testing.T, target string) string {
+	t.Helper()
+	resp, err := http.Get(target)
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			t.Logf("close body: %v", cerr)
+		}
+	}()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}

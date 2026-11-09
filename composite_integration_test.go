@@ -118,3 +118,71 @@ func TestComposite_UnknownToolErrors(t *testing.T) {
 		t.Errorf("expected error for unknown tool, got %s", w.Body.String())
 	}
 }
+
+// writeMemberCache writes a tools/list cache file for a backend name exactly as
+// saveToolsCache would, so newGateway loads it at build time.
+func writeMemberCache(t *testing.T, dir, name string, tools ...string) {
+	t.Helper()
+	list := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		list = append(list, map[string]any{"name": tool})
+	}
+	data, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "_gw_tools",
+		"result":  map[string]any{"tools": list},
+	})
+	if err != nil {
+		t.Fatalf("marshal cache: %v", err)
+	}
+	b := &Backend{name: name, cacheDir: dir, toolsCache: data}
+	b.saveToolsCache()
+}
+
+// A composite route whose members all have a disk cache must serve tools/list
+// from those caches without spawning any member (the lazy-spawn invariant that
+// single routes already honour).
+func TestCompositeToolsList_ServedFromCacheNoSpawn(t *testing.T) {
+	dir := t.TempDir()
+	writeMemberCache(t, dir, "combo/m1", "alpha", "beta")
+	writeMemberCache(t, dir, "combo/m2", "gamma")
+
+	cfg := Config{
+		Listen:   ":0",
+		CacheDir: dir,
+		Servers: map[string]BackendDef{
+			"m1": {Command: []string{"should-not-spawn"}},
+			"m2": {Command: []string{"should-not-spawn"}},
+		},
+		Compositions: map[string]CompositionDef{
+			"combo": {Members: []MemberDef{{Server: "m1"}, {Server: "m2"}}},
+		},
+		Routes: []RouteEntry{{Route: "combo"}},
+	}
+	gw, err := newGateway(cfg)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	defer gw.shutdownAll()
+
+	w := postJSON(t, gw, "/combo/mcp", `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("tools/list: got %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Result struct {
+			Tools []map[string]any `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Result.Tools) != 3 {
+		t.Errorf("expected 3 merged cached tools, got %d: %s", len(resp.Result.Tools), w.Body.String())
+	}
+	for _, name := range []string{"combo/m1", "combo/m2"} {
+		if gw.backends[name].isRunning() {
+			t.Errorf("member %s must not be spawned when its tools are cached", name)
+		}
+	}
+}

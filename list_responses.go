@@ -40,23 +40,27 @@ func isLocalListMethod(method string) bool {
 // result. It never spawns the backend. Returns nil if method is not a local
 // list method (caller should fall through to normal dispatch).
 func (b *Backend) localListResponse(method string, id *json.RawMessage) []byte {
-	empty, ok := emptyListResult[method]
-	if !ok {
+	if !isLocalListMethod(method) {
 		return nil
 	}
+	return listResponse(b.name, method, id, b.cachedListResult(method))
+}
 
-	cached := b.cachedListResult(method)
-	result := any(empty)
+// listResponse builds the JSON-RPC response for a local list method from a
+// cached result object, or the MCP-correct empty result when cached is nil.
+// owner names the route/backend for logging. It never spawns anything.
+func listResponse(owner, method string, id *json.RawMessage, cached json.RawMessage) []byte {
+	result := any(emptyListResult[method])
 	source := "empty"
 	if cached != nil {
-		result = json.RawMessage(cached)
+		result = cached
 		source = "cache"
 	}
 
 	resp := map[string]any{"jsonrpc": jsonRPCVersion, "id": id, "result": result}
 	data, _ := json.Marshal(resp)
 	slog.Debug("list method served locally (no spawn)",
-		"backend", b.name, "method", method, "source", source)
+		"backend", owner, "method", method, "source", source)
 	return data
 }
 

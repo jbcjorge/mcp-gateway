@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -338,12 +339,22 @@ func (b *Backend) toolsCacheBasename() string {
 	return b.name
 }
 
+// toolsCachePath returns the on-disk path of this backend's tools cache. The
+// basename is URL-path-escaped so composite member names ("<route>/<server>")
+// map to a single file directly in cacheDir instead of a non-existent
+// subdirectory, and no name can escape cacheDir. Escaping is collision-free and
+// leaves plain names (letters, digits, '-', '.', '_') unchanged, so existing
+// cache files keep their names.
+func (b *Backend) toolsCachePath() string {
+	return filepath.Join(b.cacheDir, url.PathEscape(b.toolsCacheBasename())+".json")
+}
+
 // loadToolsCache reads the cached tools/list response from disk.
 func (b *Backend) loadToolsCache() {
 	if b.cacheDir == "" {
 		return
 	}
-	path := filepath.Join(b.cacheDir, b.toolsCacheBasename()+".json")
+	path := b.toolsCachePath()
 	data, err := os.ReadFile(path) // #nosec G304 -- path from cacheDir config + backend name, not user request input
 	if err != nil {
 		return // no cache file, that's fine
@@ -361,7 +372,7 @@ func (b *Backend) saveToolsCache() {
 		slog.Warn("failed to create cache directory", "backend", b.name, "error", err)
 		return
 	}
-	path := filepath.Join(b.cacheDir, b.toolsCacheBasename()+".json")
+	path := b.toolsCachePath()
 	if err := os.WriteFile(path, b.toolsCache, 0600); err != nil {
 		slog.Warn("failed to write tools cache", "backend", b.name, "error", err)
 	} else {
@@ -445,6 +456,24 @@ func (gw *Gateway) handleDiscoverTools(env jsonRPCMessage, body []byte, b *Backe
 	}
 
 	return gw.activateAndRespond(env.ID, b, args.Category)
+}
+
+// cachedToolsResult returns the "result" object of this backend's cached
+// tools/list response, or nil when nothing usable is cached. It never spawns.
+func (b *Backend) cachedToolsResult() json.RawMessage {
+	b.mu.Lock()
+	cached := b.toolsCache
+	b.mu.Unlock()
+	if cached == nil {
+		return nil
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if json.Unmarshal(cached, &env) != nil || env.Result == nil {
+		return nil
+	}
+	return env.Result
 }
 
 // handleToolsList serves tools/list from cache when possible.
