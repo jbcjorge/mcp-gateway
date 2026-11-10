@@ -392,6 +392,14 @@ func (b *Backend) send(ctx context.Context, msg []byte) ([]byte, error) {
 		b.mu.Lock()
 		delete(b.pending, idKey)
 		b.mu.Unlock()
+		// Canceled (not DeadlineExceeded) means the parent request context was
+		// cancelled: the HTTP client went away. Report that distinctly so the
+		// caller does not treat it as a hung backend, and tell the backend the
+		// request was abandoned so it can stop work early.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			b.notifyCancelled(envelope.ID)
+			return nil, ErrClientDisconnected.Parse(errors.WithError(ctx.Err()))
+		}
 		return nil, ErrBackendTimeout.Parse(errors.WithError(ctx.Err()))
 	case <-timeoutCh:
 		b.mu.Lock()
@@ -399,6 +407,31 @@ func (b *Backend) send(ctx context.Context, msg []byte) ([]byte, error) {
 		b.mu.Unlock()
 		return nil, ErrBackendTimeout.Parse()
 	}
+}
+
+// notifyCancelled sends an MCP notifications/cancelled for request id to the
+// backend, so a cancellation-aware server stops a long wait (e.g.
+// wait_for_pipeline polling) whose client is gone. Best-effort: failures are
+// logged at debug and never returned.
+func (b *Backend) notifyCancelled(id *json.RawMessage) {
+	msg, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/cancelled",
+		"params":  map[string]any{"requestId": id, "reason": "client disconnected"},
+	})
+	if err != nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.running || b.stdin == nil {
+		return
+	}
+	if _, werr := b.stdin.Write(append(msg, '\n')); werr != nil {
+		slog.Debug("notifications/cancelled write failed", "backend", b.name, "error", werr)
+		return
+	}
+	slog.Debug("notifications/cancelled sent to backend", "backend", b.name, "id", string(*id))
 }
 
 // readLoop reads line-delimited JSON from the subprocess stdout and dispatches responses.

@@ -50,6 +50,10 @@ var (
 	ErrBackendClosed        = errors.New("backend closed")
 	ErrBackendTimeout       = errors.New("timeout waiting for response")
 	ErrBackendSendFailed    = errors.New("failed to send to backend")
+	// ErrClientDisconnected means the HTTP client closed the connection before
+	// the backend answered. It is not a backend fault, so the backend is left
+	// running rather than killed and restarted.
+	ErrClientDisconnected = errors.New("client disconnected before response")
 )
 
 // Subprocess errors

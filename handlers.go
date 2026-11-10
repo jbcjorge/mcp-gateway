@@ -98,13 +98,117 @@ func (gw *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// params._meta.authorization (stdio has no header channel). No-op otherwise.
 	body = gw.injectAuthMeta(path, envelope.Method, r, body)
 
+	// Long timed tools/calls stream: headers go out immediately and SSE
+	// keepalive comments follow, so clients with a fixed header/body timeout
+	// (Node fetch/undici: 300s) don't drop the connection mid-wait.
+	if shouldStreamCall(r, envelope.Method, body) {
+		gw.streamCall(w, r, route, envelope, body)
+		return
+	}
+
 	resp, err := gw.dispatchRoute(r.Context(), route, envelope, body)
 	if err != nil {
+		if r.Context().Err() != nil {
+			// Client is gone; writing an error would hit a closed connection.
+			slog.Debug("skipping error response, client disconnected", "route", path, "method", envelope.Method)
+			return
+		}
 		w.WriteHeader(http.StatusBadGateway)
 		gw.writeResponse(w, r, jsonRPCError(envelope.ID, CodeBackendError, err))
 		return
 	}
 	gw.writeResponse(w, r, resp)
+}
+
+// streamKeepAliveInterval is how often an SSE comment is written while a
+// streamed tools/call is in flight. Well below undici's 300s bodyTimeout.
+// A var so tests can shorten it.
+var streamKeepAliveInterval = 15 * time.Second
+
+// shouldStreamCall reports whether a request should get a streamed (SSE)
+// response: a tools/call with a declared timeout, from a client that accepts
+// text/event-stream. Untimed calls are bounded by defaultResponseTimeout (well
+// under client limits), so they keep the plain single-shot response.
+func shouldStreamCall(r *http.Request, method string, body []byte) bool {
+	if method != "tools/call" || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		return false
+	}
+	_, _, ok := parseDeclaredTimeout(body)
+	return ok
+}
+
+// streamCall dispatches a tools/call while holding the response open as an SSE
+// stream: it sends 200 + headers right away, writes a keepalive comment every
+// streamKeepAliveInterval, then emits the JSON-RPC result (or error) as one
+// "message" event. Status is already 200 by the time a failure is known, so
+// backend errors travel in the JSON-RPC error object, as MCP Streamable HTTP
+// expects. Falls back to the non-streamed path if the writer cannot flush.
+func (gw *Gateway) streamCall(w http.ResponseWriter, r *http.Request, route *Route, envelope jsonRPCMessage, body []byte) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		resp, err := gw.dispatchRoute(r.Context(), route, envelope, body)
+		if err != nil {
+			resp = jsonRPCError(envelope.ID, CodeBackendError, err)
+		}
+		gw.writeResponse(w, r, resp)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	done := make(chan streamResult, 1)
+	go func() {
+		resp, err := gw.dispatchRoute(r.Context(), route, envelope, body)
+		done <- streamResult{resp, err}
+	}()
+
+	keepAlive := time.NewTicker(streamKeepAliveInterval)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case res := <-done:
+			writeStreamResult(w, flusher, r, envelope, res)
+			return
+		case <-keepAlive.C:
+			// SSE comment: ignored by clients, but resets their idle/body timers.
+			// A write error means the client is gone; dispatch sees the cancelled
+			// request context and returns on its own, so keep waiting for it.
+			if _, err := io.WriteString(w, ": keepalive\n\n"); err == nil {
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+// streamResult is the outcome of a streamed call's dispatch.
+type streamResult struct {
+	resp []byte
+	err  error
+}
+
+// writeStreamResult emits a streamed call's final JSON-RPC result or error as
+// one SSE message event. Nothing is written if the client already disconnected.
+func writeStreamResult(w http.ResponseWriter, flusher http.Flusher, r *http.Request, envelope jsonRPCMessage, res streamResult) {
+	if res.err != nil {
+		if r.Context().Err() != nil {
+			slog.Debug("streamed call ended, client disconnected", "method", envelope.Method)
+			return
+		}
+		res.resp = jsonRPCError(envelope.ID, CodeBackendError, res.err)
+	}
+	if len(res.resp) == 0 {
+		return
+	}
+	if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", res.resp); err != nil {
+		slog.Warn("streamed response write failed", "error", err)
+		return
+	}
+	flusher.Flush()
 }
 
 // injectAuthMeta, for a tools/call to a route that declares an auth hook, copies
@@ -331,6 +435,13 @@ func (gw *Gateway) forwardToBackend(ctx context.Context, backend *Backend, envel
 	}
 
 	resp, err := backend.send(ctx, body)
+	if err != nil && clientGone(ctx, err) {
+		// The client hung up; the backend did nothing wrong. Killing it here
+		// would only cost a respawn and break other in-flight calls.
+		slog.Info("client disconnected before response; backend left running",
+			"backend", backend.name, "method", envelope.Method)
+		return nil, ErrClientDisconnected.Parse(errors.WithError(err))
+	}
 	if err != nil {
 		slog.Warn("send failed, restarting backend", "backend", backend.name, "error", err)
 		backend.kill()
@@ -367,6 +478,14 @@ func (gw *Gateway) forwardToBackend(ctx context.Context, backend *Backend, envel
 	}
 
 	return resp, nil
+}
+
+// clientGone reports whether a send failure was caused by the HTTP client
+// disconnecting (request context cancelled) rather than by the backend. Covers
+// stdio backends (ErrClientDisconnected from send) and remote backends, whose
+// outbound request fails with a transport error once ctx is cancelled.
+func clientGone(ctx context.Context, err error) bool {
+	return errors.Is(err, ErrClientDisconnected) || errors.Is(ctx.Err(), context.Canceled)
 }
 
 // extendWriteDeadlineForCall lifts the server's default WriteTimeout for a
