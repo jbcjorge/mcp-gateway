@@ -1,5 +1,5 @@
-# Binary
-mcp-gateway
+# Binary (root only; do not match cmd/mcp-gateway/)
+/mcp-gateway
 
 # Build artifacts
 dist/

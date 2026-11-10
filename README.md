@@ -427,6 +427,24 @@ make clean        # remove artifacts
 
 See [INSTALL.md](INSTALL.md) for detailed setup instructions and troubleshooting.
 
+### Project layout
+
+```
+main.go, instance.go  entry point (module root, so `go install` works): wiring, signals, pidfile/single-instance
+internal/config/    configuration model (Config, BackendDef, compositions) and loading
+internal/gateway/   runtime: routing, backends, handlers, keyed backends, OAuth broker, hot reload
+internal/cabundle/  optional CA bundle generation and env injection
+internal/logging/   slog setup and size-rotating log writer
+internal/procgroup/ process-group teardown for backend subprocesses (unix/windows)
+internal/listener/  launchd socket activation (macOS) or plain TCP listener
+internal/version/   build-time version metadata (set via -ldflags)
+docs/design/        design notes (compositions, keyed backends, OAuth broker, hot reload)
+resources/          example config and the launchd plist template
+```
+
+Everything under `internal/` is private to this module; the only public entry
+point is the `mcp-gateway` binary built from the module root.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

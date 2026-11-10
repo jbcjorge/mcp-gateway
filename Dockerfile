@@ -16,9 +16,9 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags "-s -w \
-    -X main.Version=${VERSION} \
-    -X main.Commit=${COMMIT} \
-    -X main.BuildDate=${BUILD_DATE}" \
+    -X github.com/jbcjorge/mcp-gateway/internal/version.Version=${VERSION} \
+    -X github.com/jbcjorge/mcp-gateway/internal/version.Commit=${COMMIT} \
+    -X github.com/jbcjorge/mcp-gateway/internal/version.BuildDate=${BUILD_DATE}" \
     -o /mcp-gateway .
 
 # Runtime stage

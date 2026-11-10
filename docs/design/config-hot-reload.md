@@ -4,7 +4,7 @@
 
 Adding, removing, or changing a backend requires editing `backends.json` and
 then restarting the gateway, because the topology is read only once in
-`newGateway`. MCP clients (e.g. kiro-cli) hot-reload their own `mcp.json` and
+`gateway.New`. MCP clients (e.g. kiro-cli) hot-reload their own `mcp.json` and
 try to connect to a newly added route immediately; if the gateway has not been
 restarted yet, that route returns `404 unknown backend`, which the client may
 misinterpret (e.g. fall back to an OAuth flow). The restart is an operational

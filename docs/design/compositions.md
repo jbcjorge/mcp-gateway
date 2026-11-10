@@ -162,7 +162,7 @@ type Route interface {
 - A plain server route = `Route` with one member, optional prefix.
 - A composition = `Route` with N members, last-wins map, optional prefix.
 
-`handleRequest` (main.go ~662) resolves a `Route` by path instead of a
+`handleRequest` (internal/gateway/handlers.go) resolves a `Route` by path instead of a
 `*Backend`; `handleLocally`/`forwardToBackend` operate via the `Route`. Members
 remain plain `*Backend`s so all existing lifecycle/TTL/reaper code is unchanged.
 
@@ -218,16 +218,16 @@ concern, unchanged by compositions.
 
 Completed (on main, CI green):
 - Increment 1: config schema (`servers`/`compositions`/`backends`) + lazy
-  `resolveRoutes` (composition.go).
+  `config.ResolveRoutes` (internal/config/composition.go).
 - Increment 2a: generic `mergeLists` (last-wins + prefix + ownership map)
-  (merge.go).
+  (internal/gateway/merge.go).
 - Increment 2b: `Route` abstraction (merged tools/list, owner lookup, call
-  name-rewrite) (route.go).
+  name-rewrite) (internal/gateway/route.go).
 
 Remaining — Increment 2c (Gateway wiring; changes live routing):
-1. `loadConfig`: parse the new `CompositionConfig` shape instead of the flat
+1. `config.Load`: parse the new `CompositionConfig` shape instead of the flat
    `map[string]BackendDef`.
-2. `newGateway`: call `resolveRoutes`; instantiate one `*Backend` per member
+2. `gateway.New`: call `config.ResolveRoutes`; instantiate one `*Backend` per member
    (unique key e.g. `<route>/<server>`), register members in `gw.backends` (so
    reaper/TTL/shutdown keep working), build `gw.routes[name]`.
 3. `NewBearerAuthorizer`: auth keyed by route name.

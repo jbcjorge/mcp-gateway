@@ -211,14 +211,14 @@ interaction (the first being lazy registration).
 
 ## Internal shape
 
-- `Param` struct + `Params []Param` on `BackendDef` (config.go / main.go types).
+- `Param` struct + `Params []Param` on `BackendDef` (internal/config/backend.go).
 - `Route` gains optional keyed state:
   ```go
   keyed      []Param              // nil/empty for normal routes
   children   map[string]*Backend  // instance id -> child, guarded by rt.mu
   spawning   map[string]chan struct{} // id -> in-flight spawn guard
   ```
-- `newGateway`: when a resolved route's server def has non-empty `Params`, mark
+- `gateway.New`: when a resolved route's server def has non-empty `Params`, mark
   the route keyed; do NOT eagerly build a member.
 - `dispatchRoute`: branch to keyed handlers when `route.isKeyed()`.
 - New: `keyedToolsList` (cache + param injection), `keyedToolsCall`

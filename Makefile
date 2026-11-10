@@ -16,10 +16,12 @@ VERSION ?= $(shell \
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
+VERSION_PKG := github.com/jbcjorge/mcp-gateway/internal/version
+MAIN_PKG    := .
 LDFLAGS := -s -w \
-  -X main.Version=$(VERSION) \
-  -X main.Commit=$(COMMIT) \
-  -X main.BuildDate=$(DATE)
+  -X $(VERSION_PKG).Version=$(VERSION) \
+  -X $(VERSION_PKG).Commit=$(COMMIT) \
+  -X $(VERSION_PKG).BuildDate=$(DATE)
 
 # Default target
 all: check build
@@ -57,7 +59,7 @@ update-deps:
 
 ## build: Compile binary
 build:
-	go build -ldflags '$(LDFLAGS)' -o $(BINARY) .
+	go build -ldflags '$(LDFLAGS)' -o $(BINARY) $(MAIN_PKG)
 
 ## fmt: Format code
 fmt:
@@ -262,10 +264,10 @@ endif
 ## cross-compile: Cross-compile for distribution (produces dist/ artifacts)
 cross-compile: clean
 	@mkdir -p dist
-	GOOS=darwin  GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_darwin_arm64 .
-	GOOS=darwin  GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_darwin_amd64 .
-	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_linux_arm64 .
-	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_linux_amd64 .
+	GOOS=darwin  GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_darwin_arm64 $(MAIN_PKG)
+	GOOS=darwin  GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_darwin_amd64 $(MAIN_PKG)
+	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_linux_arm64 $(MAIN_PKG)
+	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)_linux_amd64 $(MAIN_PKG)
 	@echo "Binaries in dist/"
 	@ls -lh dist/
 
