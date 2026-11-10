@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-11-10
+
+Long tool calls stream over SSE with keepalives and survive client disconnects, errors-library 0.2.0, and the code is split into internal packages with no behavior change
+
+- refactor: split flat package main into internal packages ([8e25c09f](https://github.com/jbcjorge/mcp-gateway/commit/8e25c09f64063ff99627f5892d835dd98f1f87b0))
+- chore(deps): bump errors-library from v0.1.1 to v0.2.0 ([3f259059](https://github.com/jbcjorge/mcp-gateway/commit/3f259059e585694a800149069a92d3b4c8ab82d8))
+- fix(timeout): stream long tools/call and keep backend on client disconnect ([cdf56f94](https://github.com/jbcjorge/mcp-gateway/commit/cdf56f949a507403a870bd9313f87fb62fdba898))
+
 ## [0.7.0] - 2026-11-10
 
 OAuth broker with per-backend auth hooks, hot-reload of backends.json, and a faster client handshake that no longer spawns every backend on connect
@@ -158,7 +166,8 @@ Gateway resilience: survive long tool calls and fast connect handshakes
   description truncation, remote (SSE / streamable-HTTP) backends, and health
   endpoint.
 
-[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/jbcjorge/mcp-gateway/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.4.0...v0.5.0
