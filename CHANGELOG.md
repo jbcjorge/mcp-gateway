@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-10
+
+OAuth broker with per-backend auth hooks, hot-reload of backends.json, and a faster client handshake that no longer spawns every backend on connect
+
+- ci: bump docker/login-action from 4.6.0 to 4.8.0 ([7a37715b](https://github.com/jbcjorge/mcp-gateway/commit/7a37715ba2f01a15b145a753def616b94b1684b0))
+- ci: bump SonarSource/sonarqube-scan-action from 8.2.2 to 8.4.1 ([c970eff6](https://github.com/jbcjorge/mcp-gateway/commit/c970eff6957526aea2b635087f5317b036d1ad17))
+- ci: bump the codeql group across 1 directory with 2 updates ([c235c7a7](https://github.com/jbcjorge/mcp-gateway/commit/c235c7a7d3034b13d19550a7fdcf66ad47188876))
+- chore(test): race detector, 80% coverage gate, oauth security tests ([92532ff9](https://github.com/jbcjorge/mcp-gateway/commit/92532ff9c3d44e32e95455f3008ea25d832660b5))
+- fix(handshake): answer server/discover locally, cache-first composite tools/list ([1cc85e95](https://github.com/jbcjorge/mcp-gateway/commit/1cc85e958b045bcfb59b319f3ddab44a7e2cecc2))
+- feat(auth): OAuth broker with per-backend auth hooks ([b0c4d01d](https://github.com/jbcjorge/mcp-gateway/commit/b0c4d01d4b860cd05fecf9b38973ede4f20ee682))
+- fix(timeout): extend HTTP write deadline for long tools/call ([544429e4](https://github.com/jbcjorge/mcp-gateway/commit/544429e43c271981e28e22c17b6c7c0360dde3e8))
+- feat(reload): hot-reload backends.json without a gateway restart ([cdb34a00](https://github.com/jbcjorge/mcp-gateway/commit/cdb34a008c1d71f439eeb37fcea80f950c05ddd3))
+- fix(release): correct web URL derivation (no https:// double-prefix) ([ee32d519](https://github.com/jbcjorge/mcp-gateway/commit/ee32d5192433dbd0d7c1d57ea025f869529a305c))
+- ci: bump actions/upload-artifact from 7.0.1 to 7.0.2 ([adb51c7e](https://github.com/jbcjorge/mcp-gateway/commit/adb51c7ed26c3b68df683cc03ee948ed9d65a4fe))
+- ci: bump docker/build-push-action from 7.3.0 to 7.4.0 ([7705391d](https://github.com/jbcjorge/mcp-gateway/commit/7705391da155164f17285fdb8d51c6d65ba6538b))
+
 ## [0.6.0] - 2026-10-27
 
 Gateway resilience: survive long tool calls and fast connect handshakes
@@ -142,7 +158,8 @@ Gateway resilience: survive long tool calls and fast connect handshakes
   description truncation, remote (SSE / streamable-HTTP) backends, and health
   endpoint.
 
-[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jbcjorge/mcp-gateway/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jbcjorge/mcp-gateway/compare/v0.3.0...v0.4.0
